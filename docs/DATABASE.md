@@ -2,14 +2,19 @@
 
 > Status: **Core schema slice implemented** (`universities`, `profiles`,
 > `interests`, `profile_interests`, `profile_photos` — migration
-> `20260827120000_core_schema.sql`). Verification, dating, matching,
-> messaging, safety, and notification tables are **not yet implemented**;
-> the requirements for those remain design targets in this document.
+> `20260827120000_core_schema.sql`) and **student-ID verification slice
+> implemented** (`staff_admins`, `verification_submissions`,
+> `verification_reviews` — migration `20260827130000_verification.sql`).
+> Dating, matching, messaging, safety, and notification tables are **not yet
+> implemented**; the requirements for those remain design targets in this
+> document.
 
 ## How the schema is managed
 
 - PostgreSQL via Supabase; migrations live in `supabase/migrations/` and are
-  applied with the Supabase CLI. Exactly one migration exists so far.
+  applied with the Supabase CLI. Exactly two migrations exist so far
+  (`20260827120000_core_schema.sql`, `20260827130000_verification.sql`); the
+  verification slice does **not** modify the core migration.
 - Development seed data (fictional universities + interests only) lives in
   `supabase/seed.sql`; the Supabase CLI applies it after migrations on
   `supabase db reset`. It is idempotent (`on conflict do nothing`).
@@ -203,36 +208,195 @@ supabase db lint     # optional static checks
 - The migration requires the Supabase `auth` schema; a vanilla PostgreSQL
   cannot apply it without an auth-schema emulation (as used by the tests).
 
+## Implemented — student-ID verification slice
+
+### Tables
+
+#### `staff_admins` — registered reviewers (minimal reviewer/admin registry)
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `auth_user_id` | uuid PK | FK → `auth.users(id)` ON DELETE CASCADE; a staff member is a real Supabase Auth identity |
+| `created_at` | timestamptz NOT NULL | |
+
+v1 has a single trusted admin; additional moderators are added by inserting
+rows (no schema change needed). Both verification tables carry `RESTRICT`
+foreign keys into this table, so an **invalid reviewer** (any auth user not
+registered as staff) is impossible at the FK level, and a staff member with
+recorded decisions cannot be hard-deleted (audit integrity — disable the
+account instead).
+
+#### `verification_submissions` — one row per student-ID submission
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | default `gen_random_uuid()` |
+| `profile_id` | uuid NOT NULL | FK → `profiles(id)` ON DELETE CASCADE; exactly one owning profile |
+| `status` | text NOT NULL | default `PENDING`; CHECK: exactly `PENDING` / `VERIFIED` / `REJECTED` |
+| `storage_path` | text NOT NULL UNIQUE | private Supabase Storage object reference — **no binaries, no URLs**; immutable after submission |
+| `submitted_at` | timestamptz NOT NULL | **server-assigned** (trigger, `clock_timestamp()`) — client cannot choose submission order |
+| `reviewed_at` | timestamptz NULL | **server-assigned** at decision time; NULL while pending |
+| `reviewer_id` | uuid NULL | FK → `staff_admins(auth_user_id)` ON DELETE RESTRICT; NULL until a decision |
+| `rejection_reason` | text NULL | trimmed, 1–500 chars; present **iff** status is `REJECTED` |
+| `created_at` / `updated_at` | timestamptz NOT NULL | `updated_at` maintained by trigger |
+
+#### `verification_reviews` — append-only audit trail of review decisions
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | default `gen_random_uuid()` |
+| `submission_id` | uuid NOT NULL | FK → `verification_submissions(id)` ON DELETE CASCADE |
+| `reviewer_id` | uuid NOT NULL | FK → `staff_admins(auth_user_id)` ON DELETE RESTRICT |
+| `decision` | text NOT NULL | CHECK: `VERIFIED` / `REJECTED` only |
+| `rejection_reason` | text NULL | same "present iff REJECTED" rule as submissions |
+| `created_at` | timestamptz NOT NULL | server-assigned at decision time |
+
+Rows are written **only** by the decision trigger on
+`verification_submissions` — an audit record for every decision is
+structurally guaranteed and cannot be skipped. UPDATE and TRUNCATE on this
+table raise an exception even for the service role (append-only); DELETE is
+intentionally not blocked so account deletion can cascade audit records away.
+Normal users hold no write grants and no RLS policy at all.
+
+### Relationships & deletion behavior
+
+```text
+auth.users ──1:1── profiles ──1:N── verification_submissions ──1:N── verification_reviews
+    │                                    (document reference only)              │
+    └──────────1:N── staff_admins ◀────── reviewer_id (RESTRICT, both tables) ◀──┘
+```
+
+- `verification_submissions.profile_id → profiles(id)` **ON DELETE CASCADE**
+  — submissions (and their audit records) die with the profile/account;
+  Storage object cleanup remains an application responsibility.
+- `verification_reviews.submission_id → verification_submissions(id)`
+  **ON DELETE CASCADE** — audit records follow their submission. Minimized
+  audit retention after account deletion remains a product TBD (see
+  SECURITY.md).
+- `*.reviewer_id → staff_admins(auth_user_id)` **ON DELETE RESTRICT** — a
+  reviewer with recorded decisions can never be silently erased.
+
+### Verification state machine
+
+States are exactly `PENDING`, `VERIFIED`, `REJECTED` (plus the implicit,
+never-stored "no submission yet"). Transitions, all trigger-enforced:
+
+```text
+(no submissions) ──submit──▶ PENDING          (owner INSERT; always born PENDING)
+PENDING ──staff decision──▶ VERIFIED          (audit row auto-written)
+PENDING ──staff decision──▶ REJECTED          (reason required; audit row auto-written)
+REJECTED ──resubmit──▶ PENDING                (a NEW submission row; history kept)
+VERIFIED ──▶ (terminal; further submissions rejected)
+```
+
+- Decided rows are **immutable**: no `VERIFIED/REJECTED → anything`
+  transition exists; resubmission is a new row, keeping every historical
+  submission auditable.
+- At most one **active PENDING** submission per profile (partial unique
+  index `verification_submissions_one_pending_per_profile_idx` — the hard
+  guarantee under concurrency; the insert trigger additionally rejects
+  duplicates with a friendly error).
+- A profile that is already `VERIFIED` cannot submit again.
+- The **current verification state is derived, not denormalized**: it is the
+  status of the most recent submission (or NULL if none). There is
+  deliberately no `verification_status` column on `profiles` — derivation is
+  a single indexed lookup (`(profile_id, submitted_at desc)`) and can never
+  drift from, or be manipulated against, the authoritative submission
+  records.
+
+### Status disclosure (deliberate omission)
+
+There is intentionally **no** user-callable
+`current_verification_status(profile_id)` helper: a SECURITY DEFINER
+function executable by `authenticated` would let any user query the
+verification state of **arbitrary** profiles (PENDING/REJECTED/VERIFIED
+included). Status is obtainable only through the RLS policies above:
+
+- owners read their own state via the owner-only SELECT policy on
+  `verification_submissions` (latest submission = current state);
+- staff read the review queue directly via the staff SELECT policy;
+- the future VERIFIED-gate check for discovery-era RLS policies will be
+  designed with that slice and must reveal no more than the PRD's "verified"
+  indicator — never arbitrary-profile statuses.
+
+### Triggers (state machine enforcement)
+
+All on `verification_submissions` unless noted; `SECURITY DEFINER` with
+locked `search_path` so invariants hold regardless of calling role:
+
+- **prepare_insert** (BEFORE INSERT) — mirrors the INSERT policy first
+  (claim-bearing callers may only target their own profile; the denial is
+  indistinguishable from an RLS violation so error timing cannot probe other
+  profiles), requires status `PENDING`, force-assigns `submitted_at` and
+  NULLs all review fields, rejects submissions for already-`VERIFIED`
+  profiles and duplicate `PENDING` submissions.
+- **guard_update** (BEFORE UPDATE) — `id`, `profile_id`, `storage_path`,
+  `submitted_at`, `created_at` are immutable; without a status change the
+  review fields may not move; with a status change only
+  `PENDING → VERIFIED|REJECTED` is legal, a reviewer is required,
+  `reviewed_at` is force-assigned server time, `REJECTED` requires a valid
+  trimmed reason and `VERIFIED` forces the reason to NULL.
+- **record_decision** (AFTER UPDATE) — on a legal decision, inserts the
+  `verification_reviews` audit row automatically.
+- **set_updated_at** — reuses the core trigger.
+- **append-only guard** (on `verification_reviews`) — raises on UPDATE and
+  TRUNCATE, even for the service role.
+
+### Row Level Security (verification slice)
+
+RLS is enabled on all three tables (deny-by-default). Policies:
+
+| Table | Policies |
+| --- | --- |
+| `staff_admins` | `SELECT` own membership row only for `authenticated` (`auth_user_id = auth.uid()`); non-staff see nothing. |
+| `verification_submissions` | Owner-only `SELECT`/`INSERT` (`profile_id` resolves to `auth.uid()` via `profiles`); staff `SELECT` (review queue). **No `UPDATE`/`DELETE` policies.** |
+| `verification_reviews` | Staff-only `SELECT`. **No other policies.** |
+
+Supporting behavior:
+
+- Normal users additionally hold **no UPDATE/DELETE grant** on
+  `verification_submissions` and **no write grants at all** on
+  `verification_reviews`/`staff_admins` — self-verification, reviewer
+  tampering, and audit faking fail with `permission denied` before RLS is
+  even reached. `anon` has no grants on any verification table.
+- SELECT grants on `staff_admins`/`verification_reviews` exist only so RLS
+  policy expressions can evaluate staff membership; RLS still hides all rows
+  from non-staff.
+- Decisions are performed by the service role (FastAPI checks reviewer
+  authorization against `staff_admins` before any privileged call); the
+  database structurally enforces *what* a decision must look like, while the
+  backend enforces *who* may make one.
+
+### Testing (verification slice)
+
+The shared harness (`supabase/tests/`, embedded PostgreSQL + Supabase Auth
+emulation) now applies **all** migrations in filename order and covers, in
+addition to the core suite: own-profile submission, cross-profile denial,
+own-read / cross-read denial, self-`VERIFIED`/reviewer-tamper denial, audit
+immutability, invalid states, duplicate-PENDING prevention, resubmission
+history, decision mechanics (reviewer + reason required, server timestamps,
+auto-audit), staff vs non-staff access, self-only status disclosure (no
+arbitrary-profile status and no user-callable status helper), FK
+cascade/restrict behavior, and anonymous denial.
+
 ## Requirements for future slices (NOT implemented yet)
 
 The entities below remain **requirements only** — do not treat them as
-existing tables.
-
-### Verification
-
-6. **Verifications** — one record per student-ID submission: document storage
-   reference (never URL exposure), submission timestamp, current state
-   (`PENDING` / `VERIFIED` / `REJECTED`), reviewer metadata upon decision,
-   rejection reason when rejected. Resubmission after rejection creates new
-   submissions while history remains auditable.
-7. **Verification audit trail** — append-only record of every review
-   decision: reviewer identity, decision, reason, timestamps. Must not be
-   editable or deletable by normal flows. Needs a reviewer/admin notion from
-   day one (v1: single trusted admin; extensible to more moderators).
+existing tables. (Verification and its audit trail are implemented above.)
 
 ### Dating core
 
-8. **Likes** — actor → target action records used both for discovery
+6. **Likes** — actor → target action records used both for discovery
    exclusion and mutual-match detection. A pair cannot accumulate
    conflicting/duplicate active likes (exact constraint TBD).
-9. **Passes** — actor → target "decline" records excluding targets from the
+7. **Passes** — actor → target "decline" records excluding targets from the
    feed. v1 treats passes as final (open question in PRD).
-10. **Matches** — created when two eligible users mutually like each other;
-    unordered participant pair with at-most-one-active-match dedupe;
-    visibility limited to participants; tracks unmatched state.
-11. **Conversations** — message containers for matches (likely 1:1 with an
-    active match; final modeling TBD).
-12. **Messages** — text messages within conversations: sender (participant),
+8. **Matches** — created when two eligible users mutually like each other;
+   unordered participant pair with at-most-one-active-match dedupe;
+   visibility limited to participants; tracks unmatched state.
+9. **Conversations** — message containers for matches (likely 1:1 with an
+   active match; final modeling TBD).
+10. **Messages** — text messages within conversations: sender (participant),
     server-assigned timestamp/conversation ordering; participants-only
     readability enforced by policy; inaccessible after unmatch/block while
     retained per safety/retention rules. Typing indicators are **not**
@@ -240,26 +404,30 @@ existing tables.
 
 ### Safety
 
-13. **Blocks** — blocker → blocked pairs; drives discovery exclusion and
+11. **Blocks** — blocker → blocked pairs; drives discovery exclusion and
     messaging lockout in both directions of effect; reversible on unblock.
-14. **Reports** — reporter, reported user, optional content reference,
+12. **Reports** — reporter, reported user, optional content reference,
     reason category, free-text detail, processing status for the admin
     workflow. Contents visible only to admins.
 
 ### Future-phase
 
-15. **Notifications** — in-app notification records (e.g., match made, new
+13. **Notifications** — in-app notification records (e.g., match made, new
     message) with per-user read state; delivery channels are post-v1.
 
 ## Cross-cutting requirements (carried forward)
 
 - All eligibility gates (18+, `VERIFIED`) resolvable by both FastAPI and RLS
-  policies without N+1 fan-out — denormalization or helper functions likely
-  needed when verification lands.
+  policies without N+1 fan-out — the verification slice keeps status
+  derivation to a single indexed lookup over `verification_submissions`; the
+  VERIFIED-gate helper for discovery-era policies lands with discovery and
+  must be designed so it cannot reveal arbitrary-profile statuses to normal
+  users (no such helper exists today).
 - Deletion propagation: removing an account cascades/anonymizes across
   profiles, photos, verifications, likes, passes, matches, conversations,
   messages consistent with retention rules (TBD). The core slice already
-  cascades `auth.users → profiles → photos/interests`.
+  cascades `auth.users → profiles → photos/interests`, and the verification
+  slice cascades `profiles → submissions → audit records`.
 - Storage object references remain valid or clean up atomically with rows;
   Storage-side object deletion accompanies row deletion in the app layer.
 - Verification states are exactly `PENDING`, `VERIFIED`, `REJECTED`; the
@@ -268,3 +436,21 @@ existing tables.
 - Student ID documents live in a private Storage bucket; the database stores
   references only, never the documents themselves.
 - Blocked/report relationships must not leak identity to the targeted user.
+
+### Known limitations & deferred decisions (verification slice)
+
+- **No user-side withdrawal.** A user cannot delete/cancel their own
+  `PENDING` submission (no DELETE grant); a mistaken upload is unblocked by
+  a reviewer rejection + resubmission. A "withdraw" flow is a product
+  decision, not yet taken.
+- **Audit retention after account deletion.** Audit records cascade away
+  with the account; SECURITY.md's minimized-retention rule (TBD) will need
+  either an archival design or a documented exception.
+- **Reviewer identity is hard-locked.** Staff accounts with recorded
+  decisions cannot be deleted (RESTRICT FKs); departed reviewers should have
+  their auth account disabled instead. Anonymization of departed-staff
+  audit entries is TBD.
+- **VERIFIED-gate helper is deferred.** No user-callable status helper
+  exists — arbitrary-profile status disclosure was deliberately removed from
+  the design. When the discovery slice lands, its gate check must reveal no
+  more than the PRD's "verified" indicator.
