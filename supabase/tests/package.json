@@ -1,0 +1,16 @@
+{
+  "name": "unimatch-db-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Database tests for the UniMatch core schema slice (embedded PostgreSQL + Supabase Auth emulation).",
+  "scripts": {
+    "test": "node run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.0"
+  }
+}
