@@ -1,3 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "requires_real_supabase: needs a live Supabase project (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY); skipped otherwise",
+]

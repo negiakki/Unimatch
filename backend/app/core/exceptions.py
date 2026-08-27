@@ -35,14 +35,34 @@ class NotFoundError(AppError):
     code = "not_found"
 
 
+class UnauthorizedError(AppError):
+    status_code = 401
+    code = "unauthorized"
+
+
+class BadRequestError(AppError):
+    status_code = 400
+    code = "bad_request"
+
+
 class PermissionDeniedError(AppError):
     status_code = 403
     code = "permission_denied"
 
 
+class PayloadTooLargeError(AppError):
+    status_code = 413
+    code = "file_too_large"
+
+
 class ConflictError(AppError):
     status_code = 409
     code = "conflict"
+
+
+class ServiceUnavailableError(AppError):
+    status_code = 503
+    code = "service_unavailable"
 
 
 _STATUS_TO_CODE = {

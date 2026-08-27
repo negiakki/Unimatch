@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     supabase_service_role_key: str = ""
 
+    # Student ID verification document storage (private bucket; server-side only).
+    verification_bucket_name: str = "verification-documents"
+    verification_max_upload_bytes: int = 10 * 1024 * 1024
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [
