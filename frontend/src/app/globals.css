@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/*
+ * UniMatch design tokens.
+ *
+ * Light/neutral surfaces, dark ink, white cards with subtle borders,
+ * restrained coral accent. Fonts are wired to next/font variables
+ * (see src/app/layout.tsx).
+ */
+:root {
+  --background: #fafaf9; /* page background  */
+  --surface: #ffffff; /* card surface     */
+  --ink: #1c1917; /* primary text     */
+  --muted: #78716c; /* secondary text   */
+  --line: #e7e5e4; /* hairline borders */
+  --accent: #ff6b61; /* coral            */
+}
+
+/* Tailwind theme tokens — usable as bg-background, text-ink, etc. */
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --font-sans: var(--font-sans);
+  --radius-card: 1.25rem;
+  --shadow-card: 0 1px 2px rgb(28 25 23 / 0.06);
+}
+
+body {
+  background: var(--background);
+  color: var(--ink);
+}

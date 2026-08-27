@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "bai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "B.AI",
+      "options": {
+        "baseURL": "https://api.b.ai/v1"
+      },
+      "models": {
+        "glm-5.3-flash": {
+          "name": "GLM-5.3-Flash"
+        }
+      }
+    }
+  }
+}
