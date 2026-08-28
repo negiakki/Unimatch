@@ -2,8 +2,9 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import health, verification
+from app.api.routes import admin, health, verification
 
 api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(verification.router)
+api_router.include_router(admin.router)
