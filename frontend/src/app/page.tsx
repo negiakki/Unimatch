@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
     <main className="mx-auto w-full max-w-md px-5 pb-16">
@@ -10,9 +12,12 @@ export default function Home() {
           <span className="w-full rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98]">
             Get started
           </span>
-          <span className="w-full rounded-2xl border border-line bg-surface py-3.5 font-semibold text-ink transition-transform active:scale-[0.98]">
+          <Link
+            href="/login"
+            className="w-full rounded-2xl border border-line bg-surface py-3.5 text-center font-semibold text-ink shadow-card transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
             I have an account
-          </span>
+          </Link>
         </div>
         <p className="mt-6 max-w-xs text-sm text-muted">
           Every member is a real student with a verified university ID.
