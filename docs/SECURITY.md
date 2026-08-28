@@ -55,6 +55,46 @@
   invalid reviewer impossible. The service role (FastAPI, after checking
   reviewer authorization server-side) performs decisions; the database
   structurally enforces decision shape, the backend enforces who may decide.
+  In FastAPI this is enforced by a dedicated staff dependency: the caller's
+  Supabase Auth bearer token is resolved to an auth user id, and reviewer
+  membership is checked server-side against `staff_admins` with the
+  service-role client (401 for unauthenticated callers, 403 for
+  authenticated non-staff).
+- **Reviewer queue discloses metadata only:** `GET /api/v1/admin/verifications`
+  (staff-only, above) returns submission id, profile id, status, submitted_at,
+  and minimal profile/university fields needed for ID review. It deliberately
+  never returns `storage_path`, the document itself, or any signed URL;
+  client-supplied `user_id`/`reviewer_id` values carry no authorization
+  weight, and student verification endpoints and RLS behavior are unchanged.
+- **Document signed URLs are short-lived and server-generated:**
+  `GET /api/v1/admin/verifications/{id}/document-url` (staff-only) resolves
+  the private object path from the database server-side (never from the
+  client), generates a signed URL through the backend-only service-role
+  client, and returns it. The bucket remains private; no public URL or Storage
+  policy is created; `storage_path` is never returned to any caller. The
+  signed URL has a default lifetime of 300 seconds (5 minutes, configurable
+  via `VERIFICATION_SIGNED_URL_TTL_SECONDS`). When it expires the reviewer
+  must request a fresh URL. Unauthorized users (missing/invalid token, or
+  non-staff) receive 401/403 with no Storage interaction. Nonexistent
+  submissions receive 404, and Storage failures produce 503.
+- **Decisions are staff-only and server-identified:**
+  `POST /api/v1/admin/verifications/{id}/decision` records a `VERIFIED` or
+  `REJECTED` decision. Only registered staff may decide; the reviewer identity
+  derives exclusively from the authenticated Supabase Auth bearer token
+  (resolved to an auth user and checked against `staff_admins` server-side) —
+  client-supplied `reviewer_id`/`auth_user_id`/`user_id` values carry no
+  authorization weight and are never persisted. The submission UUID in the URL
+  is the only client-supplied identifier. `storage_path` and private document
+  access are unrelated to and unaffected by a decision request. Decisions are
+  constrained to the legal transitions `PENDING → VERIFIED` / `PENDING →
+  REJECTED` (decided rows are immutable); invalid transitions return a clean
+  409 conflict, never a raw database error. A `REJECTED` decision requires a
+  non-empty, trimmed, ≤500-char rejection reason (enforced by API validation
+  and again by the database); `VERIFIED` never persists a rejection reason.
+  The decision timestamp is server-assigned and each decision is automatically
+  written to the append-only `verification_reviews` audit trail by the existing
+  trigger — the backend never inserts audit records itself, so duplicate or
+  skipped audit rows are impossible.
 - **Decisions are constrained and audited by construction:** a decision must
   be a legal transition (`PENDING → VERIFIED` / `PENDING → REJECTED`, the
   only status changes allowed; decided rows are immutable), requires a
@@ -77,8 +117,9 @@
   the owner-only RLS read; other profiles' statuses are unobtainable by
   clients.
 - Signed URLs for ID documents: short TTL, generated per-request for
-  reviewers only, never persisted in logs or analytics. (Storage buckets,
-  upload and URL-signing are **not yet implemented**.)
+  reviewers only, never persisted in logs or analytics. This is now
+  implemented for reviewers (`GET /api/v1/admin/verifications/{id}/document-url`),
+  generated server-side against the private bucket.
 
 ## Block / report privacy
 
@@ -122,8 +163,6 @@
   single v1 admin. The database side exists (`staff_admins` registry + FK
   enforcement); the FastAPI-side membership check and any reviewer-facing
   tooling come with the review workflow implementation.
-- Storage buckets, upload flow, and signed-URL generation for student ID
-  documents (the database already stores path references only).
 - Rate limiting / abuse controls for uploads, swipes, and messaging.
 - Session refresh middleware pattern for Next.js + Supabase Auth.
 - JWT validation middleware specifics on FastAPI protected routes.
