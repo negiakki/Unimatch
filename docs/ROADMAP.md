@@ -24,13 +24,14 @@ authoritative specification.
 - Signup collects date of birth; hard 18+ eligibility check server-side
 - Onboarding entry points wired to verification gating UX
 
-## Phase 3 — Profiles & photos
+## Phase 3 — Profiles & photos ✅ (complete)
 
 - Profile create/edit (required + optional fields per PRD) — **implemented**
 - Photo upload/delete/reorder, primary photo ordering (min 1 / max 6) —
-  **implemented** (private `profile-photos` bucket, signed-URL delivery;
-  interests remain open below)
-- Interests catalog & selection chips
+  **implemented** (private `profile-photos` bucket, signed-URL delivery)
+- Interests catalog & selection chips — **implemented** (read-only
+  `GET /interests` catalog; up to 8 selections per profile, validated
+  server-side, replace-set updates on edit)
 
 ## Phase 4 — Student ID verification + manual review
 

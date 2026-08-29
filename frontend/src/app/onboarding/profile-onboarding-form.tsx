@@ -6,6 +6,11 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { PhotoManager } from "@/components/photo-manager";
 import { ProfileFormFields } from "@/components/profile-form-fields";
 import {
+  fetchInterests,
+  InterestsApiError,
+  type Interest,
+} from "@/lib/api/interests";
+import {
   ProfileApiError,
   createMyProfile,
   fetchMyProfile,
@@ -38,13 +43,14 @@ const EMPTY_VALUES: ProfileFormValues = {
   relationship_intent: "",
   height_cm: "",
   hometown: "",
+  interest_ids: [],
 };
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
 function messageFor(error: unknown): string {
-  if (error instanceof ProfileApiError) {
+  if (error instanceof ProfileApiError || error instanceof InterestsApiError) {
     return error.message;
   }
   return "Something went wrong. Please try again.";
@@ -58,6 +64,10 @@ export function ProfileOnboardingForm() {
 
   const [universities, setUniversities] = useState<University[]>([]);
   const [universitiesLoading, setUniversitiesLoading] = useState(true);
+
+  const [interests, setInterests] = useState<Interest[]>([]);
+  const [interestsLoading, setInterestsLoading] = useState(true);
+  const [interestsError, setInterestsError] = useState<string | null>(null);
 
   const [values, setValues] = useState<ProfileFormValues>(EMPTY_VALUES);
   const [fieldErrors, setFieldErrors] = useState<ProfileFieldErrors>({});
@@ -79,6 +89,25 @@ export function ProfileOnboardingForm() {
     }
   }, []);
 
+  const loadInterests = useCallback(async () => {
+    setInterestsLoading(true);
+    setInterestsError(null);
+    try {
+      const catalog = await fetchInterests();
+      setInterests(catalog);
+    } catch (error) {
+      // Non-fatal: interests are optional, the selection is preserved, and
+      // the backend re-validates every submitted id. A retry can repopulate
+      // the picker.
+      console.error("Failed to load interests:", error);
+      setInterestsError(
+        "Couldn't load interests right now. You can continue without them.",
+      );
+    } finally {
+      setInterestsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -89,7 +118,7 @@ export function ProfileOnboardingForm() {
       } catch (error) {
         if (error instanceof ProfileApiError) {
           if (error.code === "not_found") {
-            await loadUniversities();
+            await Promise.all([loadUniversities(), loadInterests()]);
             setPhase("ready");
             return;
           }
@@ -103,7 +132,7 @@ export function ProfileOnboardingForm() {
         setPhase("error");
       }
     })();
-  }, [router, loadUniversities, reloadKey]);
+  }, [router, loadUniversities, loadInterests, reloadKey]);
 
   const retryLoad = useCallback(() => {
     setLoadError(null);
@@ -239,6 +268,10 @@ export function ProfileOnboardingForm() {
           universities={universities}
           universitiesLoading={universitiesLoading}
           disabled={submitting}
+          interests={interests}
+          interestsLoading={interestsLoading}
+          interestsError={interestsError}
+          onRetryInterests={loadInterests}
           onChange={handleChange}
         />
 

@@ -17,6 +17,8 @@
  */
 
 import { apiBaseUrl } from "@/lib/env";
+import type { Interest } from "@/lib/api/interests";
+import { MAX_INTERESTS } from "@/lib/api/interests";
 import { createClient } from "@/lib/supabase/client";
 
 export type ProfileGender = "woman" | "man" | "non_binary" | "other";
@@ -48,6 +50,8 @@ export interface Profile {
   relationship_intent: ProfileRelationshipIntent | null;
   height_cm: number | null;
   hometown: string | null;
+  /** Selected interests as client-safe catalog entries (name order). */
+  interests: Interest[];
   profile_prompts: unknown[];
   social_links: Record<string, unknown>;
   created_at: string;
@@ -67,6 +71,8 @@ export interface ProfileInput {
   relationship_intent: ProfileRelationshipIntent | null;
   height_cm: number | null;
   hometown: string | null;
+  /** Replacement set of interest catalog ids (max 8). */
+  interest_ids: string[];
 }
 
 /** Raw form values as typed into the controls (heights etc. stay strings). */
@@ -82,6 +88,8 @@ export interface ProfileFormValues {
   relationship_intent: string;
   height_cm: string;
   hometown: string;
+  /** Currently selected interest catalog ids. */
+  interest_ids: string[];
 }
 
 export type ProfileFieldKey =
@@ -94,7 +102,8 @@ export type ProfileFieldKey =
   | "seeking_gender"
   | "bio"
   | "height_cm"
-  | "hometown";
+  | "hometown"
+  | "interest_ids";
 
 export type ProfileFieldErrors = Partial<Record<ProfileFieldKey, string>>;
 
@@ -215,6 +224,10 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFieldErro
     errors.hometown = "Your hometown must be 100 characters or fewer.";
   }
 
+  if (values.interest_ids.length > MAX_INTERESTS) {
+    errors.interest_ids = `You can pick at most ${MAX_INTERESTS} interests.`;
+  }
+
   return errors;
 }
 
@@ -235,6 +248,7 @@ export function profileInputFromForm(values: ProfileFormValues): ProfileInput {
         : (values.relationship_intent as ProfileRelationshipIntent),
     height_cm: heightRaw === "" ? null : Number(heightRaw),
     hometown: values.hometown.trim() === "" ? null : values.hometown.trim(),
+    interest_ids: values.interest_ids,
   };
 }
 
@@ -251,6 +265,7 @@ export function profileFormValuesFromProfile(profile: Profile): ProfileFormValue
     relationship_intent: profile.relationship_intent ?? "",
     height_cm: profile.height_cm === null ? "" : String(profile.height_cm),
     hometown: profile.hometown ?? "",
+    interest_ids: profile.interests.map((interest) => interest.id),
   };
 }
 

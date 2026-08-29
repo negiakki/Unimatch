@@ -1,14 +1,17 @@
 """Profile endpoints for the authenticated student.
 
 GET  /api/v1/profiles/me — the caller's own profile (404 profile_not_found
-when none exists yet). POST /api/v1/profiles/me — create it (409
-profile_already_exists when one exists). PUT /api/v1/profiles/me — update the
-editable fields.
+when none exists yet), including the selected interests. POST
+/api/v1/profiles/me — create it (409 profile_already_exists when one exists).
+PUT /api/v1/profiles/me — update the editable fields and replace the interest
+selection.
 
 Ownership derives exclusively from the Supabase bearer token
 (CurrentAuthenticatedUser dependency). `auth_user_id` is never part of the
 request models, is never persisted from client input, and is never returned.
-`profile_prompts` / `social_links` / photos are out of scope for this slice.
+Interest selections are validated against the catalog server-side: at most 8
+IDs, no duplicates, catalog membership required. `profile_prompts` /
+`social_links` / photos are out of scope for this slice.
 """
 
 from datetime import date
@@ -44,7 +47,8 @@ class ProfileWrite(BaseModel):
 
     `auth_user_id` is deliberately absent: ownership comes from the token, so
     a client cannot create or adopt another user's profile, and unknown extra
-    fields (Pydantic default) are ignored.
+    fields (Pydantic default) are ignored. `interest_ids` is route input —
+    the service layer removes it before any profiles write.
     """
 
     first_name: str
@@ -58,6 +62,14 @@ class ProfileWrite(BaseModel):
     relationship_intent: RelationshipIntent | None = None
     height_cm: int | None = Field(default=None, ge=100, le=250)
     hometown: str | None = None
+    interest_ids: list[UUID] = Field(default_factory=list, max_length=8)
+
+    @field_validator("interest_ids")
+    @classmethod
+    def _validate_interest_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("interest_ids must not contain duplicates.")
+        return value
 
     @field_validator("first_name")
     @classmethod
@@ -118,8 +130,8 @@ def get_my_profile(
     auth_user_id: CurrentAuthUserDep,
     supabase: SupabaseDep,
 ) -> dict[str, Any]:
-    """Return the authenticated user's own profile."""
-    profile = profile_service.get_own_profile_or_not_found(supabase, auth_user_id)
+    """Return the authenticated user's own profile with selected interests."""
+    profile = profile_service.get_own_profile_with_interests(supabase, auth_user_id)
     return _profile_payload(profile)
 
 
@@ -159,7 +171,9 @@ def _profile_payload(row: dict[str, Any]) -> dict[str, Any]:
     """Project a profile row to client-safe fields.
 
     auth_user_id and anything verification/private related are never
-    included; the client knows its own session already.
+    included; the client knows its own session already. Interests are
+    client-safe catalog entries (`id` + `name`) resolved server-side for the
+    token-owned profile only.
     """
     return {
         "id": str(row.get("id")),
@@ -174,6 +188,7 @@ def _profile_payload(row: dict[str, Any]) -> dict[str, Any]:
         "relationship_intent": row.get("relationship_intent"),
         "height_cm": row.get("height_cm"),
         "hometown": row.get("hometown"),
+        "interests": row.get("interests") or [],
         "profile_prompts": row.get("profile_prompts") or [],
         "social_links": row.get("social_links") or {},
         "created_at": row.get("created_at"),

@@ -1,5 +1,8 @@
 "use client";
 
+import { useState } from "react";
+
+import { MAX_INTERESTS, type Interest } from "@/lib/api/interests";
 import type {
   ProfileFieldErrors,
   ProfileFormValues,
@@ -59,6 +62,10 @@ interface ProfileFormFieldsProps {
   universities: University[];
   universitiesLoading: boolean;
   disabled: boolean;
+  interests: Interest[];
+  interestsLoading: boolean;
+  interestsError: string | null;
+  onRetryInterests?: () => void;
   onChange: (patch: Partial<ProfileFormValues>) => void;
 }
 
@@ -68,9 +75,21 @@ export function ProfileFormFields({
   universities,
   universitiesLoading,
   disabled,
+  interests,
+  interestsLoading,
+  interestsError,
+  onRetryInterests,
   onChange,
 }: ProfileFormFieldsProps) {
   const maxDate = todayIsoDate();
+
+  function toggleInterest(interestId: string) {
+    const selected = values.interest_ids.includes(interestId);
+    const next = selected
+      ? values.interest_ids.filter((id) => id !== interestId)
+      : [...values.interest_ids, interestId];
+    onChange({ interest_ids: next });
+  }
 
   return (
     <div className="text-left">
@@ -297,7 +316,137 @@ export function ProfileFormFields({
             {values.bio.trim().length}/500
           </span>
         </div>
+
+        <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-muted">
+          Your interests
+        </h2>
+        <InterestPicker
+          interests={interests}
+          interestsLoading={interestsLoading}
+          interestsError={interestsError}
+          selectedIds={values.interest_ids}
+          onToggle={toggleInterest}
+          onRetry={onRetryInterests}
+        />
+        <FieldError message={errors.interest_ids} />
       </fieldset>
+    </div>
+  );
+}
+
+/**
+ * Multi-select interest chips backed by the server catalog. Toggling adds or
+ * removes a single selection; at the limit, further selections are refused
+ * with a clear message (deselection always stays possible). The parent owns
+ * the selection state — this component only turns clicks into toggles.
+ */
+function InterestPicker({
+  interests,
+  interestsLoading,
+  interestsError,
+  selectedIds,
+  onToggle,
+  onRetry,
+}: {
+  interests: Interest[];
+  interestsLoading: boolean;
+  interestsError: string | null;
+  selectedIds: string[];
+  onToggle: (interestId: string) => void;
+  onRetry?: () => void;
+}) {
+  const [refusedExtra, setRefusedExtra] = useState(false);
+  const selectedCount = selectedIds.length;
+  const atLimit = selectedCount >= MAX_INTERESTS;
+
+  function handleToggle(interest: Interest) {
+    const isSelected = selectedIds.includes(interest.id);
+    if (!isSelected && atLimit) {
+      setRefusedExtra(true);
+      return;
+    }
+    setRefusedExtra(false);
+    onToggle(interest.id);
+  }
+
+  return (
+    <div className="mt-1.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="text-sm text-muted">
+          Pick up to {MAX_INTERESTS} things you love.
+        </p>
+        <span className="shrink-0 text-xs font-medium text-muted">
+          {selectedCount}/{MAX_INTERESTS}
+        </span>
+      </div>
+
+      {interestsLoading ? (
+        <p className="mt-3 text-sm text-muted">Loading interests…</p>
+      ) : interestsError ? (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <p role="alert" className="text-sm font-medium text-red-600">
+            {interestsError}
+          </p>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className={`rounded-full border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      ) : interests.length === 0 ? (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <p role="alert" className="text-sm font-medium text-red-600">
+            No interests are available right now.
+          </p>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className={`rounded-full border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {interests.map((interest) => {
+            const selected = selectedIds.includes(interest.id);
+            return (
+              <button
+                key={interest.id}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => handleToggle(interest)}
+                className={`rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
+                  selected
+                    ? "border-accent bg-accent/15 text-accent"
+                    : "border-line bg-surface text-ink hover:border-accent/50"
+                } ${FOCUS_RING}`}
+              >
+                {interest.name}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <p aria-live="polite" className="mt-2 min-h-5 text-xs font-medium">
+        {refusedExtra || atLimit ? (
+          <span className="text-accent">
+            That&apos;s the maximum of {MAX_INTERESTS} interests — deselect one
+            to pick another.
+          </span>
+        ) : (
+          <span className="sr-only">
+            {selectedCount} of {MAX_INTERESTS} interests selected
+          </span>
+        )}
+      </p>
     </div>
   );
 }

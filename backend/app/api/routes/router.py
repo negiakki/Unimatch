@@ -2,12 +2,21 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import admin, health, photos, profiles, universities, verification
+from app.api.routes import (
+    admin,
+    health,
+    interests,
+    photos,
+    profiles,
+    universities,
+    verification,
+)
 
 api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(profiles.router)
 api_router.include_router(photos.router)
 api_router.include_router(universities.router)
+api_router.include_router(interests.router)
 api_router.include_router(verification.router)
 api_router.include_router(admin.router)

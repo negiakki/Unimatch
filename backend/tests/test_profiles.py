@@ -83,6 +83,7 @@ PROFILE_RESPONSE_KEYS = {
     "relationship_intent",
     "height_cm",
     "hometown",
+    "interests",
     "profile_prompts",
     "social_links",
     "created_at",
@@ -106,16 +107,22 @@ class FakeTable:
         self._table_name = table_name
         self._fail_insert_with = fail_insert_with
         self._filters: dict = {}
+        self._in_filters: dict = {}
         self._single = False
         self._order = None
         self._insert_payload = None
         self._update_payload = None
+        self._delete_requested = False
 
     def select(self, _columns):
         return self
 
     def eq(self, column, value):
         self._filters[column] = value
+        return self
+
+    def in_(self, column, values):
+        self._in_filters[column] = list(values)
         return self
 
     def order(self, column):
@@ -134,25 +141,38 @@ class FakeTable:
         self._update_payload = payload
         return self
 
+    def delete(self):
+        self._delete_requested = True
+        return self
+
     def _matched(self):
         return [
             row
             for row in self._tables[self._table_name]
             if all(row.get(c) == v for c, v in self._filters.items())
+            and all(row.get(c) in v for c, v in self._in_filters.items())
         ]
 
     def execute(self):
         if self._insert_payload is not None:
             if self._fail_insert_with is not None:
                 raise self._fail_insert_with
-            row = dict(self._insert_payload)
-            row.setdefault("id", str(uuid4()))
-            row.setdefault("created_at", "2026-08-29T12:00:00+00:00")
-            row.setdefault("updated_at", "2026-08-29T12:00:00+00:00")
-            row.setdefault("profile_prompts", [])
-            row.setdefault("social_links", {})
-            self._tables[self._table_name].append(row)
-            return FakeResponse([row])
+            payloads = (
+                self._insert_payload
+                if isinstance(self._insert_payload, list)
+                else [self._insert_payload]
+            )
+            inserted = []
+            for payload in payloads:
+                row = dict(payload)
+                row.setdefault("id", str(uuid4()))
+                row.setdefault("created_at", "2026-08-29T12:00:00+00:00")
+                row.setdefault("updated_at", "2026-08-29T12:00:00+00:00")
+                row.setdefault("profile_prompts", [])
+                row.setdefault("social_links", {})
+                self._tables[self._table_name].append(row)
+                inserted.append(dict(row))
+            return FakeResponse(inserted)
         if self._update_payload is not None:
             updated = []
             for row in self._tables[self._table_name]:
@@ -161,6 +181,12 @@ class FakeTable:
                     row["updated_at"] = "2026-08-29T13:00:00+00:00"
                     updated.append(dict(row))
             return FakeResponse(updated)
+        if self._delete_requested:
+            matched = self._matched()
+            self._tables[self._table_name] = [
+                row for row in self._tables[self._table_name] if row not in matched
+            ]
+            return FakeResponse(matched)
         matched = self._matched()
         if self._order is not None:
             matched = sorted(matched, key=lambda row: row.get(self._order) or "")
@@ -171,7 +197,12 @@ class FakeTable:
 
 class FakeSupabase:
     def __init__(self, users_by_token, *, fail_insert_with=None):
-        self.tables = {"profiles": [], "universities": []}
+        self.tables = {
+            "profiles": [],
+            "universities": [],
+            "interests": [],
+            "profile_interests": [],
+        }
         self._fail_insert_with = fail_insert_with
         self._users_by_token = users_by_token
         self.auth = self

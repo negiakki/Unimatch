@@ -6,6 +6,11 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { PhotoManager } from "@/components/photo-manager";
 import { ProfileFormFields } from "@/components/profile-form-fields";
 import {
+  fetchInterests,
+  InterestsApiError,
+  type Interest,
+} from "@/lib/api/interests";
+import {
   ProfileApiError,
   fetchMyProfile,
   fetchUniversities,
@@ -31,7 +36,7 @@ const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
 function messageFor(error: unknown): string {
-  if (error instanceof ProfileApiError) {
+  if (error instanceof ProfileApiError || error instanceof InterestsApiError) {
     return error.message;
   }
   return "Something went wrong. Please try again.";
@@ -44,6 +49,10 @@ export function ProfileEditForm() {
 
   const [universities, setUniversities] = useState<University[]>([]);
   const [universitiesLoading, setUniversitiesLoading] = useState(true);
+
+  const [interests, setInterests] = useState<Interest[]>([]);
+  const [interestsLoading, setInterestsLoading] = useState(true);
+  const [interestsError, setInterestsError] = useState<string | null>(null);
 
   const [values, setValues] = useState<ProfileFormValues | null>(null);
   const [fieldErrors, setFieldErrors] = useState<ProfileFieldErrors>({});
@@ -71,12 +80,31 @@ export function ProfileEditForm() {
     }
   }, []);
 
+  const loadInterests = useCallback(async () => {
+    setInterestsLoading(true);
+    setInterestsError(null);
+    try {
+      const catalog = await fetchInterests();
+      setInterests(catalog);
+    } catch (error) {
+      // Non-fatal: the saved selection stays in the form values and is
+      // submitted unchanged, so a failed catalog load can never silently
+      // clear interests. A retry repopulates the picker.
+      console.error("Failed to load interests:", error);
+      setInterestsError(
+        "Couldn't load interests right now. Your saved interests are kept.",
+      );
+    } finally {
+      setInterestsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void (async () => {
       setSaved(false);
       try {
         await loadProfile();
-        await loadUniversities();
+        await Promise.all([loadUniversities(), loadInterests()]);
         setPhase("ready");
       } catch (error) {
         if (error instanceof ProfileApiError) {
@@ -94,7 +122,7 @@ export function ProfileEditForm() {
         setPhase("error");
       }
     })();
-  }, [router, loadProfile, loadUniversities, reloadKey]);
+  }, [router, loadProfile, loadUniversities, loadInterests, reloadKey]);
 
   const retryLoad = useCallback(() => {
     setPhase("loading");
@@ -205,6 +233,10 @@ export function ProfileEditForm() {
           universities={universities}
           universitiesLoading={universitiesLoading}
           disabled={submitting}
+          interests={interests}
+          interestsLoading={interestsLoading}
+          interestsError={interestsError}
+          onRetryInterests={loadInterests}
           onChange={handleChange}
         />
 

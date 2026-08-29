@@ -53,10 +53,67 @@ Signup collects date of birth; the backend rejects users under 18
 
 | Area | Endpoint sketch | Notes |
 | --- | --- | --- |
-| Get/update my profile | `GET/PUT /profiles/me` | **Implemented** |
-| Interests | managed within profile ops | Catalog + selections; exact shape TBD |
+| Get/update my profile | `GET/POST/PUT /profiles/me` | **Implemented** — POST creates (one per account); contract below |
+| Interests catalog | `GET /interests` | **Implemented** — read-only catalog; contract below |
+| Interest selection | managed within profile ops | **Implemented** — `interest_ids` on profile writes; rules below |
 | Photos | `GET/POST /profiles/me/photos`, `DELETE /profiles/me/photos/{id}`, `PUT /profiles/me/photos/order` | **Implemented** — private bucket, backend-proxied upload, short-lived signed URLs; contract below |
 | View others' profile | `GET /profiles/{user_id}` | Authorized only when viewer may legitimately see that profile |
+
+#### `GET /api/v1/interests`
+
+Returns the shared interest catalog (read-only reference data) in
+deterministic name order. Authentication required; students can never create
+or modify catalog entries.
+
+```json
+[
+  { "id": "0b8f7c2e-…", "name": "Hiking" },
+  { "id": "13a9d4f0-…", "name": "Photography" }
+]
+```
+
+Only client-safe fields (`id`, `name`) are returned. Errors: `unauthorized`
+(401), `database_unavailable` (503).
+
+#### Interest selection on `POST` / `PUT /api/v1/profiles/me`
+
+The request body accepts an optional `interest_ids` array of interest
+catalog UUIDs; the profile response always includes the resulting selection
+as `interests` — client-safe catalog entries resolved server-side, ordered
+by name:
+
+```json
+{
+  "…profile fields…": "…",
+  "interests": [
+    { "id": "0b8f7c2e-…", "name": "Gaming" },
+    { "id": "13a9d4f0-…", "name": "Hiking" }
+  ],
+  "profile_prompts": [],
+  "social_links": {},
+  "created_at": "…",
+  "updated_at": "…"
+}
+```
+
+Validation rules (violations are the standard 422 `validation_error`):
+
+- Every supplied id must exist in the interests catalog (checked
+  server-side before any write; the database FK remains the backstop).
+- No duplicate ids in one request.
+- At most **8** interests (`interest_ids` max length 8); an empty or omitted
+  array is valid and means no interests.
+- Selections always apply to the profile resolved from the bearer token —
+  client-supplied `auth_user_id`/`profile_id` values carry no weight.
+- `PUT` uses **replace-set semantics**: the caller's existing selections are
+  deleted and exactly the submitted set is written (an empty array clears
+  all interests). Unrelated profile fields are untouched by that step.
+
+Errors: `unauthorized` (401), `profile_not_found` (404, PUT without a
+profile), `profile_already_exists` (409, POST when one exists),
+`validation_error` (422 — unknown interest id, duplicate ids, more than 8
+ids, or any other profile field violation), `database_unavailable` /
+`database_insert_failed` / `database_update_failed` (503).
 
 #### Profile photos — `POST /api/v1/profiles/me/photos`
 
