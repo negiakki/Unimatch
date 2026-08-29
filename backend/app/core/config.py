@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     verification_max_upload_bytes: int = 10 * 1024 * 1024
     verification_signed_url_ttl_seconds: int = 300
 
+    # Member profile photo storage (private bucket; server-side only).
+    profile_photos_bucket_name: str = "profile-photos"
+    profile_photos_max_upload_bytes: int = 10 * 1024 * 1024
+    profile_photos_max_count: int = 6
+    profile_photos_signed_url_ttl_seconds: int = 3600
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [

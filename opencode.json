@@ -10,6 +10,12 @@
       "models": {
         "glm-5.3-flash": {
           "name": "GLM-5.3-Flash"
+        },
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash"
+        },
+        "qwen3.8-flash": {
+          "name": "Qwen3.8-Flash"
         }
       }
     }

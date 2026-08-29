@@ -114,6 +114,35 @@ await exec(`
   as $fn$
     select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
   $fn$;
+
+  -- Minimal Supabase STORAGE emulation: only the objects the storage
+  -- migrations reference (buckets + objects + foldername). Test-only; real
+  -- Supabase Storage provides these in production.
+  create schema if not exists storage;
+  create table if not exists storage.buckets (
+    id                 text primary key,
+    name               text not null,
+    public             boolean not null default false,
+    file_size_limit    bigint,
+    allowed_mime_types text[]
+  );
+  create table if not exists storage.objects (
+    id        uuid primary key default gen_random_uuid(),
+    bucket_id text not null references storage.buckets (id),
+    name      text not null,
+    metadata  jsonb
+  );
+  create unique index if not exists storage_objects_bucket_name_key
+    on storage.objects (bucket_id, name);
+  alter table storage.objects enable row level security;
+  create or replace function storage.foldername(name text) returns text[]
+  language sql immutable
+  as $fn$
+    select string_to_array(name, '/')
+  $fn$;
+  grant usage on schema storage to anon, authenticated, service_role;
+  grant select, insert, update, delete on storage.objects to anon, authenticated;
+  grant all on storage.objects to service_role;
 `);
 
 // Apply every migration exactly as the Supabase CLI would (filename order).
@@ -1133,4 +1162,141 @@ test('31 · verification: anonymous clients have no access to verification table
   await expectFailure(() => rows(`select * from public.verification_submissions`), 'permission denied');
   await expectFailure(() => rows(`select * from public.verification_reviews`), 'permission denied');
   await expectFailure(() => rows(`select * from public.staff_admins`), 'permission denied');
+});
+
+// ============================================================================
+// Storage slices — private buckets and object policies
+// ============================================================================
+
+test('32 · storage: verification and profile-photo buckets are private with photo/document limits', async () => {
+  await actAsService();
+  const buckets = await rows(`select * from storage.buckets order by id`);
+  assert.deepEqual(buckets.map((b) => b.id), ['profile-photos', 'verification-documents']);
+
+  for (const bucket of buckets) {
+    assert.equal(bucket.public, false, `${bucket.id} must be private`);
+    assert.equal(bucket.file_size_limit, 10485760, `${bucket.id} caps uploads at 10 MB`);
+  }
+
+  const photos = buckets.find((b) => b.id === 'profile-photos');
+  assert.deepEqual(photos.allowed_mime_types.sort(), ['image/jpeg', 'image/png', 'image/webp']);
+
+  const documents = buckets.find((b) => b.id === 'verification-documents');
+  assert.deepEqual(documents.allowed_mime_types.sort(), [
+    'application/pdf',
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+  ]);
+});
+
+test('33 · storage: profile photos are owner-scoped (upload into own path only)', async () => {
+  // The owner may upload into their own auth-uid directory of profile-photos…
+  await actAs(userA.id);
+  await rows(
+    `insert into storage.objects (bucket_id, name) values ('profile-photos', $1)`,
+    [`${userA.id}/object-a.png`]
+  );
+
+  // …but never into another user's directory.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into storage.objects (bucket_id, name) values ('profile-photos', $1)`,
+        [`${userB.id}/object-b.png`]
+      ),
+    'new row violates row-level security policy'
+  );
+
+  // …and never into another user's directory of the verification bucket
+  // either (its owner policy is identically path-scoped).
+  await expectFailure(
+    () =>
+      rows(
+        `insert into storage.objects (bucket_id, name) values ('verification-documents', $1)`,
+        [`${userB.id}/object-b.png`]
+      ),
+    'new row violates row-level security policy'
+  );
+});
+
+test('34 · storage: profile photos are readable only by their owner', async () => {
+  // The owner sees their own object…
+  await actAs(userA.id);
+  const own = await rows(`select name from storage.objects where bucket_id = 'profile-photos'`);
+  assert.equal(own.length, 1);
+  assert.ok(own[0].name.startsWith(`${userA.id}/`));
+
+  // …another authenticated user sees none of it (and none of their own here)…
+  await actAs(userB.id);
+  assert.equal(
+    (await rows(`select name from storage.objects where bucket_id = 'profile-photos'`)).length,
+    0
+  );
+
+  // …and anonymous callers are denied by default: RLS is enabled and `anon`
+  // holds no policy, so the query returns nothing (and writes are denied).
+  await actAs(null);
+  assert.equal(
+    (await rows(`select name from storage.objects where bucket_id = 'profile-photos'`)).length,
+    0
+  );
+  await expectFailure(
+    () =>
+      rows(
+        `insert into storage.objects (bucket_id, name) values ('profile-photos', 'anon/x.png')`
+      ),
+    'row-level security'
+  );
+});
+
+test('35 · storage: profile photo objects have no update/delete path for normal users', async () => {
+  await actAs(userA.id);
+  const ownName = (await rows(`select name from storage.objects where bucket_id = 'profile-photos'`))[0].name;
+
+  // No UPDATE/DELETE policies exist, so RLS filters every row away: the
+  // statements silently touch zero rows (and are never attempted by the app —
+  // object removal goes through the backend's service role).
+  assert.equal(
+    await touched(
+      `update storage.objects set name = $1 where name = $2 returning 1`,
+      [`${userA.id}/moved.png`, ownName]
+    ),
+    0
+  );
+  assert.equal(
+    await touched(`delete from storage.objects where name = $1 returning 1`, [ownName]),
+    0
+  );
+  // The object is untouched.
+  assert.equal(
+    (await rows(`select name from storage.objects where bucket_id = 'profile-photos'`))[0].name,
+    ownName
+  );
+});
+
+test('36 · storage: profile photo rows and objects are linked but independently secured', async () => {
+  // Photo rows remain owner-scoped in the database (already covered), and a
+  // row can be inserted only with a unique object path — enforcing one row
+  // per Storage object.
+  await actAs(userA.id);
+  const objectName = (
+    await rows(`select name from storage.objects where bucket_id = 'profile-photos'`)
+  )[0].name;
+
+  await rows(
+    `insert into public.profile_photos (profile_id, storage_path, position, is_primary)
+     values ($1, $2, 2, false)`,
+    [profileA.id, objectName]
+  );
+
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.profile_photos (profile_id, storage_path, position, is_primary)
+         values ($1, $2, 3, false)`,
+        [profileA.id, objectName]
+      ),
+    'profile_photos_storage_path_key'
+  );
 });

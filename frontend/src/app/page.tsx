@@ -9,9 +9,12 @@ export default function Home() {
           Dating, exclusively for verified university students.
         </p>
         <div className="mt-8 flex w-full flex-col gap-3">
-          <span className="w-full rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98]">
+          <Link
+            href="/signup"
+            className="w-full rounded-2xl bg-accent py-3.5 text-center font-semibold text-white shadow-card transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
             Get started
-          </span>
+          </Link>
           <Link
             href="/login"
             className="w-full rounded-2xl border border-line bg-surface py-3.5 text-center font-semibold text-ink shadow-card transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background"

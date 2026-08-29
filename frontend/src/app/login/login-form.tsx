@@ -1,14 +1,18 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent, type ReactNode } from "react";
 
+import { ProfileApiError, fetchMyProfile } from "@/lib/api/profile";
 import { createClient } from "@/lib/supabase/client";
 
 /**
  * Sign-in form backed by the existing Supabase browser client.
  * Calls supabase.auth.signInWithPassword(); @supabase/ssr persists the
  * session cookie, so /verify can read the access token as usual.
+ * After sign-in the caller's profile is checked: without a profile the user
+ * continues to /onboarding, with one to the verification flow.
  */
 
 const FOCUS_RING =
@@ -56,6 +60,24 @@ function Icon({ children, className }: { children: ReactNode; className?: string
   );
 }
 
+/**
+ * Post-sign-in destination: users without a profile go to onboarding;
+ * everyone else continues to the verification flow. If the profile check
+ * can't complete (network, backend hiccup) the pre-existing default
+ * (/verify) applies so sign-in is never blocked by it.
+ */
+async function destinationAfterSignIn(): Promise<string> {
+  try {
+    await fetchMyProfile();
+    return "/verify";
+  } catch (error) {
+    if (error instanceof ProfileApiError && error.code === "not_found") {
+      return "/onboarding";
+    }
+    return "/verify";
+  }
+}
+
 function LockIcon({ className }: { className?: string }) {
   return (
     <Icon className={className}>
@@ -96,7 +118,7 @@ export function LoginForm() {
         setError(messageForAuthError(authError));
         return;
       }
-      router.replace("/verify");
+      router.replace(await destinationAfterSignIn());
     } catch {
       setError(
         "We couldn't reach the sign-in service. Check your connection and try again.",
@@ -168,9 +190,14 @@ export function LoginForm() {
         </button>
       </form>
 
-      <p className="mt-4 text-center text-xs leading-relaxed text-muted">
-        Don&apos;t have an account yet? You&apos;ll be able to create one
-        during onboarding.
+      <p className="mt-4 text-center text-sm text-muted">
+        Don&apos;t have an account yet?{" "}
+        <Link
+          href="/signup"
+          className="font-semibold text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
+          Create an account
+        </Link>
       </p>
     </section>
   );

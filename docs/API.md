@@ -53,10 +53,88 @@ Signup collects date of birth; the backend rejects users under 18
 
 | Area | Endpoint sketch | Notes |
 | --- | --- | --- |
-| Get/update my profile | `GET/PUT /profiles/me` | Field set per PRD Profiles section |
+| Get/update my profile | `GET/PUT /profiles/me` | **Implemented** |
 | Interests | managed within profile ops | Catalog + selections; exact shape TBD |
-| Photos | `POST/DELETE /profiles/me/photos`, reorder endpoint, set-primary | Private storage upload flow (direct-to-Supabase vs proxied) TBD |
+| Photos | `GET/POST /profiles/me/photos`, `DELETE /profiles/me/photos/{id}`, `PUT /profiles/me/photos/order` | **Implemented** — private bucket, backend-proxied upload, short-lived signed URLs; contract below |
 | View others' profile | `GET /profiles/{user_id}` | Authorized only when viewer may legitimately see that profile |
+
+#### Profile photos — `POST /api/v1/profiles/me/photos`
+
+Uploads a profile photo for the authenticated user (multipart `file`).
+Authorization derives exclusively from the bearer token; the profile is
+resolved server-side and the Storage object path is generated server-side
+(`<auth.uid()>/<random-file-id>.<ext>` in the **private** `profile-photos`
+bucket) — never from client input. The upload is proxied by the backend
+using the service-role client; the client never touches Storage directly.
+
+Server-side validation (the browser MIME type is never trusted alone):
+magic-byte sniffing accepts JPEG/PNG/WebP only; a declared type that
+contradicts the bytes is rejected; max 10 MB; max **6 photos** per profile.
+
+Uploads append to the end of the order; the first photo of an empty profile
+becomes the primary photo. Response `201` (the `url` is a short-lived signed
+URL; `storage_path` is never returned):
+
+```json
+{ "id": "0b8f7c2e-…", "position": 3, "is_primary": false, "url": "https://<project>.supabase.co/storage/v1/object/sign/profile-photos/…" }
+```
+
+Errors: `unauthorized` (401), `profile_not_found` (404), `invalid_file_type`
+(400, empty/unknown/mismatched bytes), `file_too_large` (413),
+`photo_limit_reached` (409, 6 photos already), `photo_upload_conflict` (409,
+concurrent mutation — retry), `storage_upload_failed` (503),
+`database_unavailable` / `database_insert_failed` (503). A database failure
+after the Storage upload removes the just-uploaded object (no orphans).
+
+#### `GET /api/v1/profiles/me/photos`
+
+Returns the caller's photos ordered by position (position 1 = primary) with
+short-lived signed URLs for the private bucket (default TTL 3600 s).
+`storage_path` is never returned.
+
+```json
+{
+  "photos": [
+    { "id": "…", "position": 1, "is_primary": true, "url": "https://…" },
+    { "id": "…", "position": 2, "is_primary": false, "url": "https://…" }
+  ],
+  "max_photos": 6
+}
+```
+
+Errors: `unauthorized` (401), `profile_not_found` (404),
+`database_unavailable` / `storage_signing_failed` (503).
+
+#### `DELETE /api/v1/profiles/me/photos/{photo_id}`
+
+Deletes the caller's photo row and its private Storage object (service
+role), then renumbers the remaining photos to 1..N preserving their relative
+order; the photo at position 1 is the primary photo. A foreign or unknown
+photo id is `photo_not_found` (404) — no existence leak. Returns the updated
+collection in the same shape as the list endpoint.
+
+Errors: `unauthorized` (401), `profile_not_found` (404), `photo_not_found`
+(404), `database_unavailable` / `database_delete_failed` / `storage_signing_failed` (503).
+
+#### `PUT /api/v1/profiles/me/photos/order`
+
+Applies a full ordering to the caller's photos. The body must be a
+permutation of ALL of the profile's photo ids — each id exactly once, no
+unknown ids; the photo placed first becomes the primary photo. Position
+values, `is_primary`, and storage paths are server-derived and never
+accepted from the client.
+
+```json
+{ "photo_ids": ["c…", "a…", "b…"] }
+```
+
+Response `200` — the updated collection (same shape as the list endpoint).
+Errors: `unauthorized` (401), `profile_not_found` (404), `photo_not_found`
+(404, ids belonging to other users or unknown photos),
+`invalid_photo_order` (400, not a permutation of the caller's photos),
+`photo_upload_conflict` (409, concurrent mutation — retry),
+`validation_error` (422, more than 6 ids), `database_unavailable` /
+`database_update_failed` (503).
 
 ### Verification
 

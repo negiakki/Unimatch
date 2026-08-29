@@ -26,9 +26,11 @@ authoritative specification.
 
 ## Phase 3 — Profiles & photos
 
-- Profile create/edit (required + optional fields per PRD)
+- Profile create/edit (required + optional fields per PRD) — **implemented**
+- Photo upload/delete/reorder, primary photo ordering (min 1 / max 6) —
+  **implemented** (private `profile-photos` bucket, signed-URL delivery;
+  interests remain open below)
 - Interests catalog & selection chips
-- Photo upload/delete/reorder, primary photo ordering (min 1 / max 6)
 
 ## Phase 4 — Student ID verification + manual review
 

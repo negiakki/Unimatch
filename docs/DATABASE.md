@@ -2,19 +2,22 @@
 
 > Status: **Core schema slice implemented** (`universities`, `profiles`,
 > `interests`, `profile_interests`, `profile_photos` — migration
-> `20260827120000_core_schema.sql`) and **student-ID verification slice
+> `20260827120000_core_schema.sql`), **student-ID verification slice
 > implemented** (`staff_admins`, `verification_submissions`,
-> `verification_reviews` — migration `20260827130000_verification.sql`).
-> Dating, matching, messaging, safety, and notification tables are **not yet
-> implemented**; the requirements for those remain design targets in this
-> document.
+> `verification_reviews` — migration `20260827130000_verification.sql`), and
+> **profile-photo Storage implemented** (private `profile-photos` bucket —
+> migration `20260827150000_profile_photos_storage.sql`). Dating, matching,
+> messaging, safety, and notification tables are **not yet implemented**;
+> the requirements for those remain design targets in this document.
 
 ## How the schema is managed
 
 - PostgreSQL via Supabase; migrations live in `supabase/migrations/` and are
-  applied with the Supabase CLI. Exactly two migrations exist so far
-  (`20260827120000_core_schema.sql`, `20260827130000_verification.sql`); the
-  verification slice does **not** modify the core migration.
+  applied with the Supabase CLI. Exactly three migrations exist so far
+  (`20260827120000_core_schema.sql`, `20260827130000_verification.sql`,
+  `20260827140000_verification_storage.sql`,
+  `20260827150000_profile_photos_storage.sql`); later slices do **not**
+  modify earlier migrations.
 - Development seed data (fictional universities + interests only) lives in
   `supabase/seed.sql`; the Supabase CLI applies it after migrations on
   `supabase db reset`. It is idempotent (`on conflict do nothing`).
@@ -196,10 +199,12 @@ supabase db lint     # optional static checks
   later, so no re-check or pg_dump/restore drift is possible. The cutoff is
   genuinely dynamic (no hardcoded date).
 - **Photo count and primary-photo invariant.** The PRD's 1–6 photo bounds
-  and "primary = lowest position" are product rules enforced by the upcoming
-  photo-management slice; the database guarantees at most one primary per
-  profile and unique ordering, but cannot express the cross-row invariants
-  without triggers (deliberately not added yet).
+  and "primary = lowest position" are product rules enforced by the
+  photo-management slice **in the backend service layer** (max count on
+  upload; `is_primary` re-derived from `position` on every mutation). The
+  database guarantees at most one primary per profile and unique ordering
+  (`UNIQUE (profile_id, position)`, partial unique index on `is_primary`);
+  the cross-row invariants are deliberately not database triggers.
 - **Value sets are preliminary.** `gender`, `seeking_gender`,
   `relationship_intent` choices are reasonable defaults awaiting product
   confirmation; changing them is a CHECK + data update.
@@ -378,6 +383,68 @@ history, decision mechanics (reviewer + reason required, server timestamps,
 auto-audit), staff vs non-staff access, self-only status disclosure (no
 arbitrary-profile status and no user-callable status helper), FK
 cascade/restrict behavior, and anonymous denial.
+
+## Implemented — profile-photo Storage slice
+
+### Bucket: `profile-photos` (private)
+
+| Setting | Value |
+| --- | --- |
+| `public` | **false** — never publicly readable |
+| `file_size_limit` | 10 MB (10485760 bytes) |
+| `allowed_mime_types` | `image/jpeg`, `image/png`, `image/webp` (photo-only; no PDF) |
+
+Student ID documents and profile photos deliberately live in **separate
+private buckets** (`verification-documents` vs `profile-photos`) with
+different MIME policies.
+
+### Object path convention
+
+`<auth.uid()>/<random-unique-file-id>.<extension>` — the first path
+component is the authenticated user's UUID and is the only ownership signal
+(enforced by every policy). No names, profile IDs, or other personal data
+appear in object paths.
+
+### Storage RLS
+
+Deny-by-default (anon holds no policy). For `authenticated`:
+
+| Policy | Effect |
+| --- | --- |
+| `profile_photos_storage_select_own` | Read objects in the caller's own `<auth.uid()>/` directory of `profile-photos` only. |
+| `profile_photos_storage_insert_own` | Upload into the caller's own directory only. |
+| *(no update/delete policies)* | Normal users can never modify or remove photo objects; deletion is a backend workflow that keeps the row and object in step. |
+
+Object delivery uses **short-lived signed URLs** generated server-side by
+the backend's service-role client (default TTL 3600 s,
+`PROFILE_PHOTOS_SIGNED_URL_TTL_SECONDS`). Storage paths are server-side
+references only and are never returned to any client.
+
+### Application-level photo rules (backend service layer)
+
+- Maximum **6 photos** per profile (`photo_limit_reached` on upload).
+- Uploads **append** to the end of the order; the first photo of an empty
+  profile becomes the primary photo.
+- Delete renumbers the remaining photos to 1..N (relative order preserved);
+  the photo at position 1 is the primary photo.
+- Reorder accepts a **full permutation** of the profile's photo ids; the
+  photo placed first becomes primary.
+- `is_primary` is re-derived from `position` on every mutation; the partial
+  unique index guarantees at most one primary at the database level.
+- Reordering and compaction run as individually-atomic PostgREST upserts
+  (two-phase for reorder: offset then final positions), so a failure mid-way
+  never violates the unique constraints and leaves a retryable, correctly
+  ordered state.
+
+### Testing (photo storage slice)
+
+The shared harness (`supabase/tests/`) emulates the Storage objects the
+migrations reference (`storage.buckets`, `storage.objects`,
+`storage.foldername`, test-only) and covers: bucket configuration (private,
+10 MB, photo-only MIME set), owner-scoped upload paths, cross-user and
+cross-bucket denial, anon denial (reads return nothing; writes are rejected),
+the absence of update/delete paths for normal users, and the one-row-per-
+object `storage_path` uniqueness.
 
 ## Requirements for future slices (NOT implemented yet)
 
