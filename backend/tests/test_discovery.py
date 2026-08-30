@@ -53,6 +53,7 @@ class FakeTable:
         self._filters: dict = {}
         self._neq_filters: dict = {}
         self._in_filters: dict = {}
+        self._or_filters: list = []
         self._orders: list = []
         self._limit: int | None = None
         self._single = False
@@ -72,6 +73,17 @@ class FakeTable:
         self._in_filters[column] = list(values)
         return self
 
+    def or_(self, expr):
+        # Supports only "col.eq.value,col.eq.value" (the backend's usage):
+        # each comma-separated clause is an independent OR alternative.
+        group = []
+        for part in expr.split(","):
+            column, op, value = part.split(".", 2)
+            assert op == "eq"
+            group.append([(column, value)])
+        self._or_filters.append(group)
+        return self
+
     def order(self, column, desc=False):
         self._orders.append((column, desc))
         return self
@@ -85,12 +97,21 @@ class FakeTable:
         return self
 
     def _matched(self):
+        def matches_or(row):
+            if not self._or_filters:
+                return True
+            return any(
+                any(all(row.get(c) == v for c, v in clause) for clause in group)
+                for group in self._or_filters
+            )
+
         return [
             row
             for row in self._tables[self._table_name]
             if all(row.get(c) == v for c, v in self._filters.items())
             and all(row.get(c) != v for c, v in self._neq_filters.items())
             and all(row.get(c) in values for c, values in self._in_filters.items())
+            and matches_or(row)
         ]
 
     def execute(self):
@@ -143,6 +164,7 @@ class FakeSupabase:
             "interests": [],
             "profile_photos": [],
             "dating_actions": [],
+            "blocks": [],
         }
         self._fail_tables = set(fail_tables)
         self._users_by_token = users_by_token

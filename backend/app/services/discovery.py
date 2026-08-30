@@ -16,9 +16,12 @@ Eligibility for this slice (exactly per the Discovery Design Report, Phase 5):
     acted on (any LIKE/PASS) are excluded from the feed — the exclusion is
     viewer-scoped. Candidates who acted on the viewer remain visible so the
     mutual like can happen; after both sides act, both feed directions are
-    excluded (Phase 6).
+    excluded (Phase 6);
+  * no active block in either direction: candidates the viewer blocked AND
+    candidates who blocked the viewer are excluded (Phase 8) — a block is
+    silent for its target, so both directions surface as absence.
 
-Deliberately NOT implemented in this slice: age preferences, blocks,
+Deliberately NOT implemented in this slice: age preferences,
 location filtering, AI recommendations, and complex ranking.
 
 Security model:
@@ -93,7 +96,8 @@ def get_discovery_feed(
 
     candidates = _query_candidates(supabase, viewer["id"])
     decided_ids = _viewer_decided_ids(supabase, viewer["id"])
-    eligible = _filter_eligible(supabase, candidates, viewer, decided_ids)
+    blocked_ids = _active_blocked_ids(supabase, viewer["id"])
+    eligible = _filter_eligible(supabase, candidates, viewer, decided_ids, blocked_ids)
     page, next_cursor = _paginate(eligible, cursor, limit)
 
     enriched = _enrich_page(
@@ -190,12 +194,14 @@ def _filter_eligible(
     candidates: list[dict[str, Any]],
     viewer: dict[str, Any],
     decided_ids: set[str],
+    blocked_ids: set[str],
 ) -> list[dict[str, Any]]:
     """Return candidates satisfying the Discovery eligibility rules.
 
     Verification is resolved in one batched query over the whole candidate
-    set (avoiding N+1), then two-sided gender compatibility and the
-    already-decided exclusion are applied.
+    set (avoiding N+1), then two-sided gender compatibility, the
+    already-decided exclusion, and the two-direction block exclusion are
+    applied.
     """
     candidate_ids = [str(row["id"]) for row in candidates]
     verified_ids = _verified_profile_ids(supabase, candidate_ids)
@@ -205,6 +211,8 @@ def _filter_eligible(
         if str(candidate["id"]) not in verified_ids:
             continue
         if str(candidate["id"]) in decided_ids:
+            continue
+        if str(candidate["id"]) in blocked_ids:
             continue
         if not _gender_compatible(viewer, candidate):
             continue
@@ -238,6 +246,43 @@ def _viewer_decided_ids(supabase: Client, viewer_profile_id: str) -> set[str]:
         for row in getattr(outgoing, "data", None) or []
         if row.get("target_profile_id")
     }
+
+
+def _active_blocked_ids(supabase: Client, viewer_profile_id: str) -> set[str]:
+    """Profiles with an active block touching the viewer, in EITHER direction.
+
+    Blocks are a two-direction visibility filter (Phase 8): a candidate the
+    viewer blocked AND a candidate who blocked the viewer both disappear —
+    a block is silent for its target, so both directions surface as absence,
+    never as a "blocked" signal. One batched query; no per-candidate lookups.
+    Also consumed by the dating and messaging slices (targets, matches,
+    conversations, and message access).
+    """
+    try:
+        response = (
+            supabase.table("blocks")
+            .select("blocker_profile_id,blocked_profile_id")
+            .or_(
+                f"blocker_profile_id.eq.{viewer_profile_id},"
+                f"blocked_profile_id.eq.{viewer_profile_id}"
+            )
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("Block exclusion lookup failed")
+        raise ServiceUnavailableError(
+            "This action is temporarily unavailable.", code="database_unavailable"
+        ) from exc
+    rows = getattr(response, "data", None) or []
+    blocked: set[str] = set()
+    for row in rows:
+        blocker = row.get("blocker_profile_id")
+        target = row.get("blocked_profile_id")
+        if blocker == viewer_profile_id and target:
+            blocked.add(str(target))
+        elif target == viewer_profile_id and blocker:
+            blocked.add(str(blocker))
+    return blocked
 
 
 def _verified_profile_ids(supabase: Client, profile_ids: list[str]) -> set[str]:

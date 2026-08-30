@@ -21,6 +21,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, model_validator
 
 from app.api.deps import CurrentStaffUserDep, SettingsDep, SupabaseDep
+from app.services import safety as safety_service
 from app.services import staff as staff_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -139,6 +140,21 @@ def decide_verification(
         decision.rejection_reason,
     )
     return _decision_payload(updated)
+
+
+@router.get("/reports")
+def list_reports(
+    _staff_user_id: CurrentStaffUserDep,
+    supabase: SupabaseDep,
+) -> list[dict[str, Any]]:
+    """Return reviewer-safe report metadata (newest first, capped).
+
+    Read-only v1 surface: reports carry a processing status (born OPEN) but
+    there is deliberately no transition endpoint yet. Report contents are
+    never returned to regular users; this endpoint is staff-only via the
+    existing reviewer dependency.
+    """
+    return safety_service.list_admin_reports(supabase)
 
 
 def _decision_payload(submission: dict[str, Any]) -> dict[str, Any]:

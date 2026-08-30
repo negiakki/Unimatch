@@ -3,7 +3,13 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
 import {
   fetchConversations,
@@ -15,13 +21,25 @@ import {
   type ChatMessage,
   type ConversationEntry,
 } from "@/lib/api/messaging";
+import {
+  blockUser,
+  MAX_REPORT_DETAIL_LENGTH,
+  REPORT_REASON_OPTIONS,
+  reportUser,
+  SafetyApiError,
+  type ReportReason,
+} from "@/lib/api/safety";
 
 /**
  * /messages/[id] — one conversation (a match id). Shows the newest page of
  * history in chronological order with a "load earlier" control, and polls
  * the first page (~every 5s) while the conversation is open, marking it read
  * so the unread badge stays accurate. Sending is participant-only and
- * immutable once delivered; an unmatched conversation surfaces as gone.
+ * immutable once delivered; an unmatched — or blocked — conversation
+ * surfaces as gone. The header carries the safety actions: Report (inline
+ * form, admin-reviewed, no automatic consequences) and Block (confirmed,
+ * silently hides the pair from discovery/matches/messaging both ways until
+ * unblocked).
  */
 
 const POLL_INTERVAL_MS = 5000;
@@ -65,6 +83,14 @@ export default function ConversationPage() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  const [blockBusy, setBlockBusy] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportDone, setReportDone] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportReason, setReportReason] = useState<ReportReason>("harassment");
+  const [reportDetail, setReportDetail] = useState("");
+  const [safetyError, setSafetyError] = useState<string | null>(null);
 
   const mergeMessages = useCallback((incoming: ChatMessage[]) => {
     setMessages((current) => {
@@ -201,6 +227,74 @@ export default function ConversationPage() {
   const firstName = conversation?.profile.first_name ?? "Student";
   const photoUrl = conversation ? displayablePhoto(conversation) : null;
 
+  function closeReportPanel() {
+    setReportOpen(false);
+    setReportDone(false);
+    setReportDetail("");
+    setSafetyError(null);
+  }
+
+  async function handleBlock() {
+    if (!conversation || blockBusy) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Block ${firstName}? You won't see each other and your conversation will be hidden.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    setBlockBusy(true);
+    setSafetyError(null);
+    try {
+      await blockUser(conversation.profile.id);
+      router.replace("/messages");
+    } catch (caught) {
+      if (caught instanceof SafetyApiError && caught.code === "unauthorized") {
+        router.replace("/login");
+        return;
+      }
+      console.error("Failed to block:", caught);
+      setSafetyError(
+        caught instanceof SafetyApiError
+          ? caught.message
+          : "Something went wrong. Please try again.",
+      );
+    } finally {
+      setBlockBusy(false);
+    }
+  }
+
+  async function handleReportSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!conversation || reportBusy) {
+      return;
+    }
+    setReportBusy(true);
+    setSafetyError(null);
+    try {
+      await reportUser({
+        reported_profile_id: conversation.profile.id,
+        reason: reportReason,
+        detail: reportDetail.trim() || undefined,
+      });
+      setReportDone(true);
+    } catch (caught) {
+      if (caught instanceof SafetyApiError && caught.code === "unauthorized") {
+        router.replace("/login");
+        return;
+      }
+      console.error("Failed to report:", caught);
+      setSafetyError(
+        caught instanceof SafetyApiError
+          ? caught.message
+          : "Something went wrong. Please try again.",
+      );
+    } finally {
+      setReportBusy(false);
+    }
+  }
+
   return (
     <main className="mx-auto flex h-dvh w-full max-w-lg flex-col px-5">
       <header className="flex items-center gap-3 border-b border-line py-4">
@@ -233,7 +327,123 @@ export default function ConversationPage() {
         <h1 className="min-w-0 flex-1 truncate text-lg font-bold tracking-tight">
           {phase === "ready" ? firstName : "Conversation"}
         </h1>
+        {phase === "ready" && conversation && (
+          <div className="flex shrink-0 items-center gap-2">
+            {!reportOpen && (
+              <button
+                type="button"
+                onClick={() => {
+                  setReportOpen(true);
+                  setSafetyError(null);
+                }}
+                disabled={blockBusy}
+                className={`rounded-xl border border-line bg-surface px-3 py-2 text-sm font-semibold text-muted transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+              >
+                Report
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void handleBlock()}
+              disabled={blockBusy}
+              aria-busy={blockBusy}
+              className={`rounded-xl border border-line bg-surface px-3 py-2 text-sm font-semibold text-muted transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+            >
+              {blockBusy ? "Blocking…" : "Block"}
+            </button>
+          </div>
+        )}
       </header>
+
+      {phase === "ready" && reportOpen && (
+        <section
+          aria-label={`Report ${firstName}`}
+          className="border-b border-line py-4"
+        >
+          {reportDone ? (
+            <div className="text-center">
+              <p className="text-[15px] leading-relaxed text-ink">
+                Thank you. Our team will review this report.
+              </p>
+              <button
+                type="button"
+                onClick={closeReportPanel}
+                className={`mt-4 rounded-2xl border border-line bg-surface px-5 py-2.5 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <form
+              onSubmit={(event) => void handleReportSubmit(event)}
+              className="space-y-3"
+            >
+              <div>
+                <label
+                  htmlFor="report-reason"
+                  className="block text-sm font-semibold text-ink"
+                >
+                  Report {firstName}
+                </label>
+                <select
+                  id="report-reason"
+                  value={reportReason}
+                  onChange={(event) =>
+                    setReportReason(event.target.value as ReportReason)
+                  }
+                  className="mt-2 w-full rounded-2xl border border-line bg-surface px-4 py-2.5 text-[15px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  {REPORT_REASON_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label
+                  htmlFor="report-detail"
+                  className="block text-sm font-semibold text-ink"
+                >
+                  Details <span className="font-normal text-muted">(optional)</span>
+                </label>
+                <textarea
+                  id="report-detail"
+                  value={reportDetail}
+                  onChange={(event) => setReportDetail(event.target.value)}
+                  rows={3}
+                  maxLength={MAX_REPORT_DETAIL_LENGTH}
+                  placeholder="What happened?"
+                  className="mt-2 w-full resize-none rounded-2xl border border-line bg-surface px-4 py-2.5 text-[15px] text-ink placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                />
+              </div>
+              {safetyError && (
+                <p role="alert" className="text-sm text-muted">
+                  {safetyError}
+                </p>
+              )}
+              <div className="flex items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={reportBusy}
+                  aria-busy={reportBusy}
+                  className={`rounded-2xl bg-accent px-5 py-2.5 text-sm font-semibold text-white shadow-card transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+                >
+                  {reportBusy ? "Sending…" : "Send report"}
+                </button>
+                <button
+                  type="button"
+                  onClick={closeReportPanel}
+                  disabled={reportBusy}
+                  className={`rounded-2xl border border-line bg-surface px-5 py-2.5 text-sm font-semibold text-muted transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+        </section>
+      )}
 
       {phase === "loading" && (
         <div className="flex-1 space-y-3 py-6" aria-busy="true" aria-live="polite">

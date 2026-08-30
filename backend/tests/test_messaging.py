@@ -225,6 +225,7 @@ class FakeSupabase:
             "profile_photos": [],
             "matches": [],
             "messages": [],
+            "blocks": [],
         }
         self._fail_tables = set(fail_tables)
         self._users_by_token = users_by_token

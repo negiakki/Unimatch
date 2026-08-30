@@ -38,6 +38,7 @@ from app.core.exceptions import (
 )
 from app.services.discovery import (
     _CANDIDATE_COLUMNS,
+    _active_blocked_ids,
     _get_verified_viewer,
     _interests_by_profile,
     _is_verified,
@@ -102,7 +103,12 @@ def list_matches(
     bucket: str,
     signed_url_ttl: int,
 ) -> dict[str, Any]:
-    """List the caller's ACTIVE matches (newest first) with safe profiles."""
+    """List the caller's ACTIVE matches (newest first) with safe profiles.
+
+    Matches involving an active block in either direction are hidden from
+    both participants while the block stands (rows retained; everything
+    returns when the block is removed).
+    """
     viewer = _verified_viewer(supabase, auth_user_id)
     viewer_id = str(viewer["id"])
 
@@ -122,9 +128,21 @@ def list_matches(
         ) from exc
     rows = getattr(response, "data", None) or []
 
+    blocked_ids = _active_blocked_ids(supabase, viewer_id)
+    visible = [
+        row
+        for row in rows
+        if str(
+            row["user_b_id"]
+            if str(row["user_a_id"]) == viewer_id
+            else row["user_a_id"]
+        )
+        not in blocked_ids
+    ]
+
     partner_ids = [
         str(row["user_b_id"] if str(row["user_a_id"]) == viewer_id else row["user_a_id"])
-        for row in rows
+        for row in visible
     ]
     profiles_by_id = _profiles_by_id(supabase, partner_ids)
 
@@ -134,7 +152,7 @@ def list_matches(
     )
 
     matches = []
-    for row in rows:
+    for row in visible:
         partner_id = str(
             row["user_b_id"] if str(row["user_a_id"]) == viewer_id else row["user_a_id"]
         )
@@ -186,6 +204,16 @@ def unmatch(supabase: Client, auth_user_id: UUID, match_id: UUID) -> dict[str, A
     ):
         raise NotFoundError("Match not found.")
 
+    # A blocked match is invisible to every operation — unmatch included —
+    # so a block surfaces the same 404 here (unblock first to unmatch).
+    other_id = (
+        str(match["user_b_id"])
+        if str(match["user_a_id"]) == viewer_id
+        else str(match["user_a_id"])
+    )
+    if other_id in _active_blocked_ids(supabase, viewer_id):
+        raise NotFoundError("Match not found.")
+
     try:
         # PostgREST treats JSON values as literals, so the timestamp is
         # generated here (the CHECK keeps unmatched_at >= created_at).
@@ -226,9 +254,14 @@ def _eligible_target(
     """Resolve the target profile and require it to be a VERIFIED candidate.
 
     Self-actions, unknown profiles, and unverified profiles all surface the
-    same 404 — no existence leak.
+    same 404 — no existence leak. A target involved in an active block in
+    either direction surfaces the same 404: blocks are silent, and likes/
+    passes (and blocks) can never cross them.
     """
     if str(target_profile_id) == viewer_profile_id:
+        raise NotFoundError("Profile not found.")
+    blocked_ids = _active_blocked_ids(supabase, viewer_profile_id)
+    if str(target_profile_id) in blocked_ids:
         raise NotFoundError("Profile not found.")
     try:
         response = (

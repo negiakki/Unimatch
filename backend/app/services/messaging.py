@@ -12,11 +12,12 @@ Security model (mirrors the dating/discovery slices):
   * Messaging requires the CALLER to be VERIFIED (403 otherwise). The matched
     partner is not re-checked per request: matches only ever form between
     VERIFIED profiles (both sides pass the like flow's gate).
-  * Participant-only access: unknown match ids, nonparticipant calls, and
-    calls on already-unmatched matches all surface the same 404 — no
-    existence leak, and an unmatch makes the conversation inaccessible
-    immediately. The same rule is re-enforced here AND in RLS (the service
-    role bypasses RLS, so the backend re-implements every rule).
+  * Participant-only access: unknown match ids, nonparticipant calls, calls
+    on already-unmatched matches, and conversations with an active block in
+    either direction all surface the same 404 — no existence leak, and an
+    unmatch or block makes the conversation inaccessible immediately. The
+    same rule is re-enforced here AND in RLS (the service role bypasses
+    RLS, so the backend re-implements every rule).
   * Message bodies are trimmed and must be 1..2000 characters (422 outside;
     the database CHECK re-enforces it).
   * Sending runs through one atomic RPC that also increments the recipient's
@@ -35,6 +36,7 @@ from app.core.exceptions import (
 )
 from app.services.discovery import (
     _CANDIDATE_COLUMNS,
+    _active_blocked_ids,
     _candidate_payload,
     _decode_cursor,
     _encode_cursor,
@@ -92,9 +94,23 @@ def list_conversations(
         ) from exc
     rows = getattr(response, "data", None) or []
 
+    # A block in either direction hides the conversation from BOTH sides
+    # while it stands (rows retained; access restored on unblock).
+    blocked_ids = _active_blocked_ids(supabase, viewer_id)
+    visible = [
+        row
+        for row in rows
+        if str(
+            row["user_b_id"]
+            if str(row["user_a_id"]) == viewer_id
+            else row["user_a_id"]
+        )
+        not in blocked_ids
+    ]
+
     partner_ids = [
         str(row["user_b_id"] if str(row["user_a_id"]) == viewer_id else row["user_a_id"])
-        for row in rows
+        for row in visible
     ]
     profiles_by_id = _profiles_by_id(supabase, partner_ids)
     interests_by_profile = _interests_by_profile(supabase, partner_ids)
@@ -103,7 +119,7 @@ def list_conversations(
     )
 
     conversations = []
-    for row in rows:
+    for row in visible:
         partner_id = str(
             row["user_b_id"] if str(row["user_a_id"]) == viewer_id else row["user_a_id"]
         )
@@ -292,10 +308,12 @@ def mark_conversation_read(
 def _require_active_participant(
     supabase: Client, viewer_profile_id: str, match_id: UUID
 ) -> dict[str, Any]:
-    """404 unless the viewer is a participant of an ACTIVE match with this id.
+    """404 unless the viewer is a participant of an ACTIVE, unblocked match.
 
-    Unknown matches, nonparticipants, and already-unmatched matches all
-    surface the same 404 — no existence leak.
+    Unknown matches, nonparticipants, already-unmatched matches, and matches
+    with an active block in either direction all surface the same 404 — no
+    existence leak; a blocked conversation is indistinguishable from a gone
+    one. (RLS and the send RPC mirror the block check.)
     """
     try:
         response = (
@@ -317,6 +335,14 @@ def _require_active_participant(
         or viewer_profile_id
         not in (str(match.get("user_a_id")), str(match.get("user_b_id")))
     ):
+        raise NotFoundError("Conversation not found.")
+
+    other_id = (
+        str(match["user_b_id"])
+        if str(match["user_a_id"]) == viewer_profile_id
+        else str(match["user_a_id"])
+    )
+    if other_id in _active_blocked_ids(supabase, viewer_profile_id):
         raise NotFoundError("Conversation not found.")
     return match
 

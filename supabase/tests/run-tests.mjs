@@ -204,7 +204,7 @@ let submissionV2; // V's resubmission (PENDING -> VERIFIED)
 // Tests
 // ============================================================================
 
-test('01 · migrations create exactly the eleven expected tables on a clean database', async () => {
+test('01 · migrations create exactly the thirteen expected tables on a clean database', async () => {
   const t = await rows(`
     select table_name from information_schema.tables
     where table_schema = 'public' and table_type = 'BASE TABLE'
@@ -212,6 +212,7 @@ test('01 · migrations create exactly the eleven expected tables on a clean data
   assert.deepEqual(
     t.map((r) => r.table_name).sort(),
     [
+      'blocks',
       'dating_actions',
       'interests',
       'matches',
@@ -219,6 +220,7 @@ test('01 · migrations create exactly the eleven expected tables on a clean data
       'profile_interests',
       'profile_photos',
       'profiles',
+      'reports',
       'staff_admins',
       'universities',
       'verification_reviews',
@@ -233,7 +235,7 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'r'
   `);
-  assert.equal(tables.length, 11);
+  assert.equal(tables.length, 13);
   for (const t of tables) {
     assert.equal(t.relrowsecurity, true, `${t.relname} must have RLS enabled`);
   }
@@ -252,8 +254,10 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
   assert.equal(byTable['verification_submissions'], 3);
   assert.equal(byTable['verification_reviews'], 1);
   assert.equal(byTable['dating_actions'], 2); // insert_own + select_own_outgoing
-  assert.equal(byTable['matches'], 1); // select_participant
-  assert.equal(byTable['messages'], 1); // select_participant (active matches only)
+  assert.equal(byTable['matches'], 1); // select_participant (participants, no active block)
+  assert.equal(byTable['messages'], 1); // select_participant (active match, no active block)
+  assert.equal(byTable['blocks'], 3); // insert_own + select_own_outgoing + delete_own
+  assert.equal(byTable['reports'], 2); // insert_own + select_staff
 });
 
 test('03 · profile links 1:1 to the auth user (owner can create and read it)', async () => {
@@ -2118,4 +2122,443 @@ test('63 · messaging: keyset index exists; deleting a match cascades its messag
     (await rows(`select id from public.messages where match_id = $1`, [temp.id])).length,
     0
   );
+});
+
+// ============================================================================
+// Safety & moderation slice tests (Phase 8)
+// ============================================================================
+
+// Phase 8 fixtures: three fresh verified users (A, B, C). The index values
+// must stay unique across the whole file — insertVerifiedUserFixture derives
+// the verification storage_path from them.
+let safeUserA, safeUserB, safeUserC, safeProfileA, safeProfileB, safeProfileC;
+
+test('64 · safety: blocks schema invariants (self-block, uniqueness, index, cascade)', async () => {
+  await actAsService();
+  ({ user: safeUserA, profile: safeProfileA } = await insertVerifiedUserFixture('safety-a', 'S1'));
+  ({ user: safeUserB, profile: safeProfileB } = await insertVerifiedUserFixture('safety-b', 'S2'));
+  ({ user: safeUserC, profile: safeProfileC } = await insertVerifiedUserFixture('safety-c', 'S3'));
+
+  // Self-blocks are rejected by the CHECK constraint.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $1)`,
+        [safeProfileA.id]
+      ),
+    'blocks_no_self_block'
+  );
+
+  // The reverse-direction index exists (the unique constraint covers the
+  // forward direction).
+  const indexes = await rows(`
+    select indexname from pg_indexes where schemaname = 'public' and tablename = 'blocks'
+  `);
+  assert.ok(
+    indexes.map((i) => i.indexname).includes('blocks_blocked_profile_id_idx'),
+    'expected the blocked_profile_id index'
+  );
+
+  // Deleting a profile cascades its blocks away (both directions).
+  const userZ = await one(`insert into auth.users (email) values ('safety-z@example.test') returning id`);
+  const profileZ = await insertProfileAsOwner(userZ.id);
+  await actAsService();
+  await rows(
+    `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2)`,
+    [safeProfileA.id, profileZ.id]
+  );
+  await rows(
+    `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2)`,
+    [profileZ.id, safeProfileB.id]
+  );
+  await rows(`delete from auth.users where id = $1`, [userZ.id]);
+  assert.equal((await rows(`select 1 from public.blocks where blocked_profile_id = $1`, [profileZ.id])).length, 0);
+  assert.equal((await rows(`select 1 from public.blocks where blocker_profile_id = $1`, [profileZ.id])).length, 0);
+});
+
+test('65 · safety: blocks RLS insert — own blocker, VERIFIED caller, VERIFIED target', async () => {
+  // A verified blocker can block another verified profile…
+  await actAs(safeUserA.id);
+  const block = await one(
+    `insert into public.blocks (blocker_profile_id, blocked_profile_id)
+     values ($1, $2) returning id, blocker_profile_id, blocked_profile_id, created_at`,
+    [safeProfileA.id, safeProfileB.id]
+  );
+  assert.equal(block.blocker_profile_id, safeProfileA.id);
+  assert.ok(block.created_at instanceof Date);
+
+  // …exactly once (duplicate insert is rejected by the unique constraint —
+  // the backend translates this into an idempotent re-block).
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2)`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'blocks_blocker_blocked_unique'
+  );
+
+  // A client cannot spoof the blocker: blocker_profile_id must resolve to the
+  // caller's own profile.
+  await actAs(safeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2)`,
+        [safeProfileB.id, safeProfileC.id]
+      ),
+    'row-level security'
+  );
+
+  // An unverified caller cannot block at all (profileW has no submissions).
+  await actAs(userW.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2)`,
+        [profileW.id, safeProfileA.id]
+      ),
+    'row-level security'
+  );
+
+  // A verified caller cannot block an unverified profile.
+  await actAs(safeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2)`,
+        [safeProfileA.id, profileW.id]
+      ),
+    'row-level security'
+  );
+
+  // Self-block fails the CHECK regardless of role.
+  await actAs(safeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $1)`,
+        [safeProfileA.id]
+      ),
+    'blocks_no_self_block'
+  );
+
+  // Anonymous callers have no access at all.
+  await actAs(null);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2)`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'permission denied'
+  );
+});
+
+test('66 · safety: blocks are silent — only the blocker sees and removes their own rows', async () => {
+  // The blocker sees exactly their outgoing block.
+  await actAs(safeUserA.id);
+  const mine = await rows(`select blocked_profile_id from public.blocks`);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].blocked_profile_id, safeProfileB.id);
+
+  // The blocked user sees NOTHING — no incoming rows, no existence leak.
+  await actAs(safeUserB.id);
+  assert.equal((await rows(`select 1 from public.blocks`)).length, 0);
+  // …and cannot delete someone else's block (RLS filters every row away).
+  assert.equal(
+    await touched(`delete from public.blocks where blocked_profile_id = $1 returning 1`, [safeProfileA.id]),
+    0
+  );
+
+  // Unrelated users see nothing.
+  await actAs(safeUserC.id);
+  assert.equal((await rows(`select 1 from public.blocks`)).length, 0);
+
+  // Anonymous callers are denied outright.
+  await actAs(null);
+  await expectFailure(() => rows(`select 1 from public.blocks`), 'permission denied');
+
+  // The blocker can remove (unblock) their own block…
+  await actAs(safeUserA.id);
+  assert.equal(
+    await touched(`delete from public.blocks where blocked_profile_id = $1 returning 1`, [safeProfileB.id]),
+    1
+  );
+  // …and re-blocking works afterwards (fully reversible).
+  await one(
+    `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2) returning id`,
+    [safeProfileA.id, safeProfileB.id]
+  );
+});
+
+test('67 · safety: reports — insert rules, validation, duplicates allowed', async () => {
+  await actAsService();
+  const before = (await rows(`select 1 from public.reports`)).length;
+
+  // The reporter's INSERT ... RETURNING is refused: reports have deliberately
+  // NO user SELECT policy (contents are admin-only), so even the brand-new
+  // row cannot be read back by its reporter. Production inserts run through
+  // the backend's service role, which bypasses RLS.
+  await actAs(safeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+         values ($1, $2, 'harassment') returning id`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'row-level security'
+  );
+
+  // The same insert WITHOUT RETURNING goes through; status is born OPEN.
+  await rows(
+    `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+     values ($1, $2, 'harassment')`,
+    [safeProfileA.id, safeProfileB.id]
+  );
+
+  // Duplicate reports are allowed (report volume is admin signal, not an
+  // error) — the same pair, same reason, twice.
+  await rows(
+    `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+     values ($1, $2, 'harassment')`,
+    [safeProfileA.id, safeProfileB.id]
+  );
+  await actAsService();
+  const first = await one(
+    `select status, detail, content_type, content_id from public.reports order by created_at limit 1`
+  );
+  assert.equal(first.status, 'OPEN');
+  assert.equal(first.detail, null);
+  assert.equal(first.content_type, null);
+  assert.equal((await rows(`select 1 from public.reports`)).length, before + 2);
+
+  // A client cannot spoof the reporter.
+  await actAs(safeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+         values ($1, $2, 'spam')`,
+        [safeProfileB.id, safeProfileC.id]
+      ),
+    'row-level security'
+  );
+
+  // Self-reports are rejected by the CHECK constraint.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+         values ($1, $1, 'spam')`,
+        [safeProfileA.id]
+      ),
+    'reports_no_self_report'
+  );
+
+  // An unverified caller cannot report.
+  await actAs(userW.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+         values ($1, $2, 'spam')`,
+        [profileW.id, safeProfileA.id]
+      ),
+    'row-level security'
+  );
+
+  // Reason categories are a fixed enum.
+  await actAs(safeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+         values ($1, $2, 'because')`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'reports_reason_valid'
+  );
+
+  // Detail must be trimmed and at most 1000 characters (or null).
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason, detail)
+         values ($1, $2, 'spam', '  padded  ')`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'reports_detail_valid'
+  );
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason, detail)
+         values ($1, $2, 'spam', repeat('x', 1001))`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'reports_detail_valid'
+  );
+  await rows(
+    `insert into public.reports (reporter_profile_id, reported_profile_id, reason, detail)
+     values ($1, $2, 'spam', repeat('x', 1000))`,
+    [safeProfileA.id, safeProfileB.id]
+  );
+
+  // The content reference is nullable as a pair, with a fixed type set.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason, content_type)
+         values ($1, $2, 'spam', 'message')`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'reports_content_pair_valid'
+  );
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports (reporter_profile_id, reported_profile_id, reason, content_type, content_id)
+         values ($1, $2, 'spam', 'story', gen_random_uuid())`,
+        [safeProfileA.id, safeProfileB.id]
+      ),
+    'reports_content_type_valid'
+  );
+  await rows(
+    `insert into public.reports (reporter_profile_id, reported_profile_id, reason, detail, content_type, content_id)
+     values ($1, $2, 'inappropriate_content', 'See this message', 'message', gen_random_uuid())`,
+    [safeProfileA.id, safeProfileB.id]
+  );
+  await actAsService();
+  const withContent = await one(`select content_id from public.reports where content_type = 'message' limit 1`);
+  assert.ok(withContent.content_id);
+
+  // The report target need only exist — an unverified target is reportable.
+  await rows(
+    `insert into public.reports (reporter_profile_id, reported_profile_id, reason)
+     values ($1, $2, 'other')`,
+    [safeProfileA.id, profileW.id]
+  );
+});
+
+test('68 · safety: reports are admin-only — reporters and users cannot read or modify', async () => {
+  // A reporter cannot read reports back — not even their own.
+  await actAs(safeUserA.id);
+  assert.equal((await rows(`select 1 from public.reports`)).length, 0);
+
+  // Normal users hold no UPDATE/DELETE grant at all.
+  await expectFailure(
+    () => rows(`update public.reports set status = 'REVIEWED'`),
+    'permission denied'
+  );
+  await expectFailure(() => rows(`delete from public.reports`), 'permission denied');
+
+  // Staff (staff_admins registry) can read the full contents.
+  await actAs(userStaff.id);
+  const staffView = await rows(`select reporter_profile_id, reported_profile_id, reason, detail, status from public.reports`);
+  assert.ok(staffView.length >= 5, 'staff must see the reports');
+  assert.ok(staffView.every((r) => r.reporter_profile_id !== null && r.reason !== null));
+
+  // Anonymous callers are denied outright.
+  await actAs(null);
+  await expectFailure(() => rows(`select 1 from public.reports`), 'permission denied');
+});
+
+test('69 · safety: a block hides the match and messages both ways, restores on unblock', async () => {
+  await actAsService();
+  const [smallerBC, largerBC] = [safeProfileB.id, safeProfileC.id].sort();
+  const match = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smallerBC, largerBC]
+  );
+  await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'before the block') returning id`,
+    [match.id, safeProfileB.id]
+  );
+
+  // Pre-block sanity: both participants can read the match and its messages.
+  const [userOfB, userOfC] = safeProfileB.id === smallerBC ? [safeUserB, safeUserC] : [safeUserC, safeUserB];
+  const [profileOfB, profileOfC] = safeProfileB.id === smallerBC ? [safeProfileB, safeProfileC] : [safeProfileC, safeProfileB];
+  await actAs(userOfB.id);
+  assert.equal((await rows(`select 1 from public.matches where id = $1`, [match.id])).length, 1);
+  assert.equal((await rows(`select 1 from public.messages where match_id = $1`, [match.id])).length, 1);
+  await actAs(userOfC.id);
+  assert.equal((await rows(`select 1 from public.matches where id = $1`, [match.id])).length, 1);
+
+  // B blocks C.
+  await actAs(userOfB.id);
+  await one(
+    `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2) returning id`,
+    [profileOfB.id, profileOfC.id]
+  );
+
+  // The match and its messages are instantly invisible to BOTH sides —
+  // including the participant who did NOT block.
+  await actAs(userOfB.id);
+  assert.equal((await rows(`select 1 from public.matches where id = $1`, [match.id])).length, 0);
+  assert.equal((await rows(`select 1 from public.messages where match_id = $1`, [match.id])).length, 0);
+  await actAs(userOfC.id);
+  assert.equal((await rows(`select 1 from public.matches where id = $1`, [match.id])).length, 0);
+  assert.equal((await rows(`select 1 from public.messages where match_id = $1`, [match.id])).length, 0);
+
+  // The rows are retained (silence, not deletion).
+  await actAsService();
+  assert.equal((await rows(`select 1 from public.matches where id = $1`, [match.id])).length, 1);
+  assert.equal((await rows(`select 1 from public.messages where match_id = $1`, [match.id])).length, 1);
+
+  // Likes cannot cross an active block (defense-in-depth).
+  await actAs(userOfB.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'LIKE')`,
+        [profileOfB.id, profileOfC.id]
+      ),
+    'row-level security'
+  );
+
+  // The send RPC refuses a blocked pair with the same error the backend maps
+  // to 404.
+  await actAsService();
+  await expectFailure(
+    () =>
+      rows(`select public.send_conversation_message($1, $2, 'still blocked')`, [
+        match.id,
+        profileOfB.id,
+      ]),
+    'not an active participant'
+  );
+
+  // Unblock: everything is restored automatically — nothing was deleted.
+  await actAs(userOfB.id);
+  assert.equal(
+    await touched(
+      `delete from public.blocks where blocker_profile_id = $1 and blocked_profile_id = $2 returning 1`,
+      [profileOfB.id, profileOfC.id]
+    ),
+    1
+  );
+  await actAs(userOfB.id);
+  assert.equal((await rows(`select 1 from public.matches where id = $1`, [match.id])).length, 1);
+  assert.equal((await rows(`select 1 from public.messages where match_id = $1`, [match.id])).length, 1);
+  await actAs(userOfC.id);
+  assert.equal((await rows(`select 1 from public.messages where match_id = $1`, [match.id])).length, 1);
+
+  // Actions can cross again once unblocked…
+  await actAs(userOfB.id);
+  await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+     values ($1, $2, 'LIKE') returning id`,
+    [profileOfB.id, profileOfC.id]
+  );
+  // …and the send RPC works again.
+  await actAsService();
+  const sent = await one(`select public.send_conversation_message($1, $2, 'unblocked again')`, [
+    match.id,
+    profileOfB.id,
+  ]);
+  assert.ok(sent.send_conversation_message);
 });
