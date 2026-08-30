@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { MAX_INTERESTS, type Interest } from "@/lib/api/interests";
 import type {
@@ -12,15 +12,20 @@ import type {
 /**
  * Presentational profile fields shared by the /onboarding creation form and
  * the /profile/edit form. Pure UI only — validation rules live in the
- * profile API module (UX checks) and the backend (authoritative).
+ * profile API module (UX checks) and the backend (authoritative). Fields are
+ * grouped into sections so onboarding reads as a short, intentional flow
+ * rather than one long generic form.
  */
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
-const INPUT_CLASSES = `w-full rounded-2xl border border-line bg-surface px-4 py-3.5 text-[15px] text-ink shadow-card placeholder:text-muted/60 focus:border-accent disabled:opacity-40 ${FOCUS_RING}`;
+const INPUT_CLASSES = `w-full rounded-2xl border border-line bg-background px-4 py-3.5 text-[15px] text-ink shadow-card placeholder:text-muted/60 focus:border-accent disabled:opacity-40 ${FOCUS_RING}`;
 
-const ACADEMIC_YEARS = [1, 2, 3, 4, 5, 6, 7, 8];
+// ponytail: UI offers years 1–6 per product scope while the backend + DB
+// still accept 1–8; tighten the backend contract to 1–6 in a coordinated
+// change (routes + migration + tests) before ever widening this list.
+const ACADEMIC_YEARS = [1, 2, 3, 4, 5, 6];
 
 const GENDERS: { value: string; label: string }[] = [
   { value: "woman", label: "Woman" },
@@ -54,6 +59,55 @@ function universityLabel(university: University): string {
     .filter((part) => part && part.trim())
     .join(", ");
   return place ? `${university.name} — ${place}` : university.name;
+}
+
+function FormSection({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="rounded-card border border-line bg-surface p-5 shadow-card">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
+        {title}
+      </h2>
+      {hint && (
+        <p className="mt-1 text-xs leading-relaxed text-muted">{hint}</p>
+      )}
+      <div className="mt-4 space-y-4">{children}</div>
+    </section>
+  );
+}
+
+function Field({
+  id,
+  label,
+  optional = false,
+  error,
+  children,
+}: {
+  id: string;
+  label: string;
+  optional?: boolean;
+  error?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <label htmlFor={id} className="block text-sm font-semibold">
+        {label}
+        {optional && (
+          <span className="font-normal text-muted"> (optional)</span>
+        )}
+      </label>
+      <div className="mt-1.5">{children}</div>
+      <FieldError message={error} />
+    </div>
+  );
 }
 
 interface ProfileFormFieldsProps {
@@ -93,242 +147,211 @@ export function ProfileFormFields({
 
   return (
     <div className="text-left">
-      <fieldset disabled={disabled} className="min-w-0">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
-          About you
-        </h2>
+      <fieldset disabled={disabled} className="min-w-0 space-y-5">
+        <FormSection title="The basics">
+          <Field id="profile-first-name" label="First name" error={errors.first_name}>
+            <input
+              id="profile-first-name"
+              type="text"
+              autoComplete="given-name"
+              placeholder="Jamie"
+              maxLength={50}
+              value={values.first_name}
+              onChange={(event) => onChange({ first_name: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.first_name)}
+            />
+          </Field>
 
-        <label htmlFor="profile-first-name" className="mt-4 block text-sm font-semibold">
-          First name
-        </label>
-        <input
-          id="profile-first-name"
-          type="text"
-          autoComplete="given-name"
-          placeholder="Jamie"
-          maxLength={50}
-          value={values.first_name}
-          onChange={(event) => onChange({ first_name: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.first_name)}
-        />
-        <FieldError message={errors.first_name} />
+          <Field id="profile-date-of-birth" label="Date of birth" error={errors.date_of_birth}>
+            <input
+              id="profile-date-of-birth"
+              type="date"
+              min="1900-01-01"
+              max={maxDate}
+              autoComplete="bday"
+              value={values.date_of_birth}
+              onChange={(event) => onChange({ date_of_birth: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.date_of_birth)}
+            />
+          </Field>
+        </FormSection>
 
-        <label
-          htmlFor="profile-date-of-birth"
-          className="mt-4 block text-sm font-semibold"
+        <FormSection
+          title="Your studies"
+          hint="Your university is matched against your student ID during verification."
         >
-          Date of birth
-        </label>
-        <input
-          id="profile-date-of-birth"
-          type="date"
-          min="1900-01-01"
-          max={maxDate}
-          autoComplete="bday"
-          value={values.date_of_birth}
-          onChange={(event) => onChange({ date_of_birth: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.date_of_birth)}
-        />
-        <FieldError message={errors.date_of_birth} />
+          <Field id="profile-university" label="University" error={errors.university_id}>
+            <select
+              id="profile-university"
+              value={values.university_id}
+              onChange={(event) => onChange({ university_id: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.university_id)}
+            >
+              <option value="">
+                {universitiesLoading
+                  ? "Loading universities…"
+                  : "Select your university"}
+              </option>
+              {universities.map((university) => (
+                <option key={university.id} value={university.id}>
+                  {universityLabel(university)}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-muted">
-          Your studies
-        </h2>
+          <Field id="profile-course" label="Course" error={errors.course}>
+            <input
+              id="profile-course"
+              type="text"
+              autoComplete="off"
+              placeholder="Computer Science"
+              maxLength={120}
+              value={values.course}
+              onChange={(event) => onChange({ course: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.course)}
+            />
+          </Field>
 
-        <label
-          htmlFor="profile-university"
-          className="mt-4 block text-sm font-semibold"
-        >
-          University
-        </label>
-        <select
-          id="profile-university"
-          value={values.university_id}
-          onChange={(event) => onChange({ university_id: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.university_id)}
-        >
-          <option value="">
-            {universitiesLoading ? "Loading universities…" : "Select your university"}
-          </option>
-          {universities.map((university) => (
-            <option key={university.id} value={university.id}>
-              {universityLabel(university)}
-            </option>
-          ))}
-        </select>
-        <FieldError message={errors.university_id} />
+          <Field id="profile-academic-year" label="Academic year" error={errors.academic_year}>
+            <select
+              id="profile-academic-year"
+              value={values.academic_year}
+              onChange={(event) => onChange({ academic_year: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.academic_year)}
+            >
+              <option value="">Select your year</option>
+              {ACADEMIC_YEARS.map((year) => (
+                <option key={year} value={String(year)}>
+                  Year {year}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </FormSection>
 
-        <label htmlFor="profile-course" className="mt-4 block text-sm font-semibold">
-          Course
-        </label>
-        <input
-          id="profile-course"
-          type="text"
-          autoComplete="off"
-          placeholder="Computer Science"
-          maxLength={120}
-          value={values.course}
-          onChange={(event) => onChange({ course: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.course)}
-        />
-        <FieldError message={errors.course} />
+        <FormSection title="Dating profile">
+          <Field id="profile-gender" label="Gender" error={errors.gender}>
+            <select
+              id="profile-gender"
+              value={values.gender}
+              onChange={(event) => onChange({ gender: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.gender)}
+            >
+              <option value="">Select your gender</option>
+              {GENDERS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        <label
-          htmlFor="profile-academic-year"
-          className="mt-4 block text-sm font-semibold"
-        >
-          Academic year
-        </label>
-        <select
-          id="profile-academic-year"
-          value={values.academic_year}
-          onChange={(event) => onChange({ academic_year: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.academic_year)}
-        >
-          <option value="">Select your year</option>
-          {ACADEMIC_YEARS.map((year) => (
-            <option key={year} value={String(year)}>
-              Year {year}
-            </option>
-          ))}
-        </select>
-        <FieldError message={errors.academic_year} />
+          <Field
+            id="profile-seeking-gender"
+            label="Interested in"
+            error={errors.seeking_gender}
+          >
+            <select
+              id="profile-seeking-gender"
+              value={values.seeking_gender}
+              onChange={(event) => onChange({ seeking_gender: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.seeking_gender)}
+            >
+              <option value="">Select who you&apos;d like to meet</option>
+              {SEEKING_GENDERS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-muted">
-          About your dating profile
-        </h2>
+          <Field id="profile-relationship-intent" label="Looking for" optional>
+            <select
+              id="profile-relationship-intent"
+              value={values.relationship_intent}
+              onChange={(event) =>
+                onChange({ relationship_intent: event.target.value })
+              }
+              className={INPUT_CLASSES}
+            >
+              <option value="">Prefer not to say</option>
+              {RELATIONSHIP_INTENTS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        <label htmlFor="profile-gender" className="mt-4 block text-sm font-semibold">
-          Gender
-        </label>
-        <select
-          id="profile-gender"
-          value={values.gender}
-          onChange={(event) => onChange({ gender: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.gender)}
-        >
-          <option value="">Select your gender</option>
-          {GENDERS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <FieldError message={errors.gender} />
+          <Field id="profile-height" label="Height in cm" optional error={errors.height_cm}>
+            <input
+              id="profile-height"
+              type="number"
+              inputMode="numeric"
+              min={100}
+              max={250}
+              step={1}
+              placeholder="170"
+              value={values.height_cm}
+              onChange={(event) => onChange({ height_cm: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.height_cm)}
+            />
+          </Field>
 
-        <label
-          htmlFor="profile-seeking-gender"
-          className="mt-4 block text-sm font-semibold"
-        >
-          Interested in
-        </label>
-        <select
-          id="profile-seeking-gender"
-          value={values.seeking_gender}
-          onChange={(event) => onChange({ seeking_gender: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.seeking_gender)}
-        >
-          <option value="">Select who you&apos;d like to meet</option>
-          {SEEKING_GENDERS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <FieldError message={errors.seeking_gender} />
+          <Field id="profile-hometown" label="Hometown" optional error={errors.hometown}>
+            <input
+              id="profile-hometown"
+              type="text"
+              autoComplete="off"
+              placeholder="Springfield"
+              maxLength={100}
+              value={values.hometown}
+              onChange={(event) => onChange({ hometown: event.target.value })}
+              className={INPUT_CLASSES}
+              aria-invalid={Boolean(errors.hometown)}
+            />
+          </Field>
 
-        <label
-          htmlFor="profile-relationship-intent"
-          className="mt-4 block text-sm font-semibold"
-        >
-          Looking for <span className="font-normal text-muted">(optional)</span>
-        </label>
-        <select
-          id="profile-relationship-intent"
-          value={values.relationship_intent}
-          onChange={(event) => onChange({ relationship_intent: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-        >
-          <option value="">Prefer not to say</option>
-          {RELATIONSHIP_INTENTS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          <Field id="profile-bio" label="Bio" error={errors.bio}>
+            <textarea
+              id="profile-bio"
+              rows={4}
+              placeholder="Tell people a little about yourself…"
+              value={values.bio}
+              onChange={(event) => onChange({ bio: event.target.value })}
+              className={`${INPUT_CLASSES} resize-none`}
+              aria-invalid={Boolean(errors.bio)}
+            />
+            <div className="mt-1 flex items-baseline justify-between gap-3">
+              <FieldError message={errors.bio} />
+              <span className="ml-auto shrink-0 text-xs text-muted">
+                {values.bio.trim().length}/500
+              </span>
+            </div>
+          </Field>
+        </FormSection>
 
-        <label htmlFor="profile-height" className="mt-4 block text-sm font-semibold">
-          Height in cm <span className="font-normal text-muted">(optional)</span>
-        </label>
-        <input
-          id="profile-height"
-          type="number"
-          inputMode="numeric"
-          min={100}
-          max={250}
-          step={1}
-          placeholder="170"
-          value={values.height_cm}
-          onChange={(event) => onChange({ height_cm: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.height_cm)}
-        />
-        <FieldError message={errors.height_cm} />
-
-        <label htmlFor="profile-hometown" className="mt-4 block text-sm font-semibold">
-          Hometown <span className="font-normal text-muted">(optional)</span>
-        </label>
-        <input
-          id="profile-hometown"
-          type="text"
-          autoComplete="off"
-          placeholder="Springfield"
-          maxLength={100}
-          value={values.hometown}
-          onChange={(event) => onChange({ hometown: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-          aria-invalid={Boolean(errors.hometown)}
-        />
-        <FieldError message={errors.hometown} />
-
-        <label htmlFor="profile-bio" className="mt-4 block text-sm font-semibold">
-          Bio
-        </label>
-        <textarea
-          id="profile-bio"
-          rows={4}
-          placeholder="Tell people a little about yourself…"
-          value={values.bio}
-          onChange={(event) => onChange({ bio: event.target.value })}
-          className={`mt-1.5 ${INPUT_CLASSES} resize-none`}
-          aria-invalid={Boolean(errors.bio)}
-        />
-        <div className="mt-1 flex items-baseline justify-between gap-3">
-          <FieldError message={errors.bio} />
-          <span className="ml-auto shrink-0 text-xs text-muted">
-            {values.bio.trim().length}/500
-          </span>
-        </div>
-
-        <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-muted">
-          Your interests
-        </h2>
-        <InterestPicker
-          interests={interests}
-          interestsLoading={interestsLoading}
-          interestsError={interestsError}
-          selectedIds={values.interest_ids}
-          onToggle={toggleInterest}
-          onRetry={onRetryInterests}
-        />
-        <FieldError message={errors.interest_ids} />
+        <FormSection title="Your interests">
+          <InterestPicker
+            interests={interests}
+            interestsLoading={interestsLoading}
+            interestsError={interestsError}
+            selectedIds={values.interest_ids}
+            onToggle={toggleInterest}
+            onRetry={onRetryInterests}
+          />
+          <FieldError message={errors.interest_ids} />
+        </FormSection>
       </fieldset>
     </div>
   );
@@ -370,7 +393,7 @@ function InterestPicker({
   }
 
   return (
-    <div className="mt-1.5">
+    <div>
       <div className="flex items-baseline justify-between gap-3">
         <p className="text-sm text-muted">
           Pick up to {MAX_INTERESTS} things you love.
@@ -422,12 +445,13 @@ function InterestPicker({
                 type="button"
                 aria-pressed={selected}
                 onClick={() => handleToggle(interest)}
-                className={`rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
+                className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
                   selected
-                    ? "border-accent bg-accent/15 text-accent"
-                    : "border-line bg-surface text-ink hover:border-accent/50"
+                    ? "border-accent bg-accent text-white shadow-card"
+                    : "border-line bg-background text-ink hover:border-accent/50"
                 } ${FOCUS_RING}`}
               >
+                {selected && <CheckIcon className="size-3.5" />}
                 {interest.name}
               </button>
             );
@@ -448,6 +472,23 @@ function InterestPicker({
         )}
       </p>
     </div>
+  );
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="m5 13 4 4L19 7" />
+    </svg>
   );
 }
 
