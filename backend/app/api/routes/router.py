@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     admin,
+    conversations,
     discovery,
     health,
     interests,
@@ -24,3 +25,4 @@ api_router.include_router(verification.router)
 api_router.include_router(admin.router)
 api_router.include_router(discovery.router)
 api_router.include_router(matches.router)
+api_router.include_router(conversations.router)

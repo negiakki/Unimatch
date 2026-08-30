@@ -74,11 +74,26 @@ authoritative specification.
   match modal), blocks/reports, age-range/location preferences,
   Super Like/Undo, "who liked you"
 
-## Phase 7 — Messaging
+## Phase 7 — Messaging (complete)
 
-- Conversations + text messages REST surface (history/send/read markers)
-- Supabase Realtime streaming: messages, read receipts, typing/presence
-- Participant-only access control end-to-end
+- Conversations + text messages REST surface: `GET /conversations`,
+  `GET /conversations/{id}/messages`, `POST /conversations/{id}/messages`,
+  `POST /conversations/{id}/read` — **implemented**
+- A conversation IS an active match (match id doubles as the conversation
+  id): participant-only access end-to-end, and an unmatch makes the
+  conversation inaccessible immediately (rows retained) — **implemented**
+- Simple per-participant unread counters (no per-message read receipts):
+  incremented atomically on send, zeroed on mark-read, surfaced in the
+  conversation list — **implemented**
+- Message bodies trimmed server-side, 1–2000 characters; messages immutable
+  in v1 (no edit/delete) — **implemented**
+- Message history keyset-paginated on (created_at, id), newest first; the
+  open conversation polls ~every 5s — **implemented**
+- Frontend: `/messages` conversation list (MatchCard profile shape + unread
+  badges), `/messages/[id]` chat view (polling, load-earlier pagination,
+  send), Message entry points from the matches page — **implemented**
+- Deferred: Supabase Realtime streaming (messages/read receipts/typing/
+  presence), attachments, push notifications, blocks integration
 
 ## Phase 8 — Safety & moderation
 

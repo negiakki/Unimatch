@@ -534,21 +534,105 @@ server-only match writes, participant-only match visibility (nonparticipants
 and anon see nothing), FK cascade behavior for actions and matches, and the
 presence of both action-direction indexes.
 
+## Implemented — messaging slice
+
+A conversation IS an active match: there is deliberately **no separate
+conversations table**. The match id doubles as the conversation id, and every
+read path requires the underlying match to still be ACTIVE
+(`unmatched_at IS NULL`), so an unmatch makes the conversation inaccessible
+immediately (rows retained). Realtime is deferred; clients poll (~5s).
+
+### Tables
+
+#### `messages` — immutable participant text messages
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | default `gen_random_uuid()` |
+| `match_id` | uuid NOT NULL | FK → `matches(id)` ON DELETE CASCADE |
+| `sender_profile_id` | uuid NOT NULL | FK → `profiles(id)` ON DELETE CASCADE |
+| `body` | text NOT NULL | CHECK: `body = btrim(body) AND char_length(body) BETWEEN 1 AND 2000` |
+| `created_at` | timestamptz NOT NULL | default `now()`; server-assigned |
+
+- Messages are immutable in v1: no UPDATE/DELETE grants or policies; there is
+  no edit/delete path anywhere (backend included).
+- The backend trims the body and rejects empty-after-trim bodies; the CHECK
+  re-enforces the same rule at the database as defense-in-depth.
+- Index: `messages_match_id_created_at_idx (match_id, created_at, id)` — one
+  composite index serves the newest-page poll and the (created_at, id) keyset
+  pagination in both directions.
+
+#### `matches` — two new per-participant unread counter columns
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `user_a_unread_count` | smallint NOT NULL DEFAULT 0 | messages user_a has not read |
+| `user_b_unread_count` | smallint NOT NULL DEFAULT 0 | messages user_b has not read |
+
+- Simple per-participant counters (deliberately NOT per-message read
+  receipts). `CHECK (user_a_unread_count >= 0 AND user_b_unread_count >= 0)`.
+  Existing match rows default to 0 — no backfill needed.
+- The counters live on the match row itself, so the conversations list needs
+  no per-conversation message scan.
+
+### Functions
+
+#### `send_conversation_message(p_match_id, p_sender_profile_id, p_body)`
+
+One atomic backend operation: verifies the sender is an active participant
+(defense-in-depth; the backend re-checks first), inserts the message, and
+increments the RECIPIENT's counter — the two can never drift apart. Execute
+is granted to `service_role` only (revoked from `public`/`authenticated`):
+normal users always send through the backend, where the sender is resolved
+from the bearer token.
+
+### Row Level Security (messaging slice)
+
+RLS is enabled on `messages` (deny-by-default). Policies:
+
+| Table | Policies |
+| --- | --- |
+| `messages` | `SELECT` for `authenticated` only when the caller (via `profiles.auth_user_id`) is a participant of the message's match AND that match is still ACTIVE (`unmatched_at IS NULL`). **No INSERT/UPDATE/DELETE policies.** |
+
+Supporting behavior:
+
+- Normal users hold a SELECT grant only on `messages` (plus the implicit
+  participant policy); `anon` has no grants. Unread counters are
+  backend-managed: normal users hold no UPDATE grant on `matches`.
+- Unmatch semantics: because the SELECT policy filters on
+  `unmatched_at IS NULL`, an unmatch cuts read access off immediately while
+  the rows are retained for future safety/retention needs.
+- The partner's verification status is NOT re-checked on messaging access —
+  matches only ever form between VERIFIED profiles; the CALLER's verification
+  gate lives in the backend (403), not in these policies.
+
+### Testing (messaging slice)
+
+The shared harness (`supabase/tests/`) covers, for this slice: the trimmed
+1..2000 body CHECK (2000 accepted, 2001 rejected), participant-only SELECT
+for ACTIVE matches (nonparticipants and anon see nothing), immutability (no
+INSERT/UPDATE/DELETE path for normal users, counters not writable either),
+the send RPC's recipient-only counter increments in both directions, the
+RPC's participant + active-match enforcement (nonparticipant and unmatched
+senders refused, nothing inserted), service-role-only EXECUTE, immediate
+inaccessibility after unmatch (with rows retained and access restorable), the
+keyset index, and match-deletion cascading messages away.
+
 ## Requirements for future slices (NOT implemented yet)
 
 The entities below remain **requirements only** — do not treat them as
-existing tables. (Verification, its audit trail, and the dating
-likes/passes/matches core are implemented above.)
+existing tables. (Verification, its audit trail, the dating
+likes/passes/matches core, and the messaging core are implemented above.)
 
-### Messaging core
+### Messaging (future-phase additions)
 
-6. **Conversations** — message containers for matches (likely 1:1 with an
-   active match; final modeling TBD).
-7. **Messages** — text messages within conversations: sender (participant),
-   server-assigned timestamp/conversation ordering; participants-only
-   readability enforced by policy; inaccessible after unmatch/block while
-   retained per safety/retention rules. Typing indicators are **not**
-   persisted (ephemeral via Realtime).
+8. **Realtime transport** — Supabase Realtime channels for live message
+   delivery, presence, and ephemeral typing indicators (v1 polls instead);
+   nothing here is persisted.
+9. **Read receipts** — per-message delivered/read states (v1 keeps one
+   per-participant unread counter per conversation).
+10. **Attachments / rich content** — non-text message bodies and their
+    storage/retention rules.
 
 ### Safety
 

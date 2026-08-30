@@ -32,6 +32,7 @@ The boundary between Next.js, FastAPI, and Supabase is authoritative:
 | Dating actions (like/pass) | ❌ | ✅ | persists |
 | Discovery rules & preferences | ❌ | ✅ | queried via service role |
 | Matching + dedupe | ❌ | ✅ | constraints |
+| Messaging (conversations, messages, unread counters) | ❌ | ✅ | persists, RLS defense-in-depth |
 | Verification workflow (submit/review/audit) | renders UI only | ✅ | stores |
 | Moderation (block/report) decisions surface | ❌ | ✅ | stores |
 | Privileged Supabase functionality (service-role reads/writes, signed URLs for private media) | ❌ | ✅ | executes |

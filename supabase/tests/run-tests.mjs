@@ -204,7 +204,7 @@ let submissionV2; // V's resubmission (PENDING -> VERIFIED)
 // Tests
 // ============================================================================
 
-test('01 · migrations create exactly the ten expected tables on a clean database', async () => {
+test('01 · migrations create exactly the eleven expected tables on a clean database', async () => {
   const t = await rows(`
     select table_name from information_schema.tables
     where table_schema = 'public' and table_type = 'BASE TABLE'
@@ -215,6 +215,7 @@ test('01 · migrations create exactly the ten expected tables on a clean databas
       'dating_actions',
       'interests',
       'matches',
+      'messages',
       'profile_interests',
       'profile_photos',
       'profiles',
@@ -232,7 +233,7 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'r'
   `);
-  assert.equal(tables.length, 10);
+  assert.equal(tables.length, 11);
   for (const t of tables) {
     assert.equal(t.relrowsecurity, true, `${t.relname} must have RLS enabled`);
   }
@@ -252,6 +253,7 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
   assert.equal(byTable['verification_reviews'], 1);
   assert.equal(byTable['dating_actions'], 2); // insert_own + select_own_outgoing
   assert.equal(byTable['matches'], 1); // select_participant
+  assert.equal(byTable['messages'], 1); // select_participant (active matches only)
 });
 
 test('03 · profile links 1:1 to the auth user (owner can create and read it)', async () => {
@@ -1821,3 +1823,299 @@ test('56 · dating: secondary indexes exist for both action directions', async (
 });
 
 
+
+// ============================================================================
+// Messaging slice tests (Phase 7)
+// ============================================================================
+
+// Phase 7 fixtures: three fresh verified users (A <-> B matched & active,
+// A <-> C matched then unmatched) with their own matches, isolated from the
+// dating tests' state.
+let msgUserA, msgUserB, msgUserC, msgProfileA, msgProfileB, msgProfileC;
+let msgMatchId; // active A<->B conversation
+let msgUnmatchedMatchId; // A<->C, unmatched (conversation inaccessible)
+
+test('57 · messaging: message bodies are trimmed, 1..2000 characters (CHECK)', async () => {
+  await actAsService();
+  ({ user: msgUserA, profile: msgProfileA } = await insertVerifiedUserFixture('messaging-a', 'M1'));
+  ({ user: msgUserB, profile: msgProfileB } = await insertVerifiedUserFixture('messaging-b', 'M2'));
+  ({ user: msgUserC, profile: msgProfileC } = await insertVerifiedUserFixture('messaging-c', 'M3'));
+
+  const [smallerAB, largerAB] = [msgProfileA.id, msgProfileB.id].sort();
+  const match = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smallerAB, largerAB]
+  );
+  msgMatchId = match.id;
+  const [smallerAC, largerAC] = [msgProfileA.id, msgProfileC.id].sort();
+  const unmatch = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smallerAC, largerAC]
+  );
+  msgUnmatchedMatchId = unmatch.id;
+  await one(`update public.matches set unmatched_at = now() where id = $1 returning 1`, [
+    msgUnmatchedMatchId,
+  ]);
+
+  // Valid insert (service role is the only writer).
+  const message = await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'Hello there!') returning id, body, created_at`,
+    [msgMatchId, msgProfileA.id]
+  );
+  assert.equal(message.body, 'Hello there!');
+
+  // Untrimmed bodies are rejected (the backend trims before insert; the
+  // database re-enforces the same rule).
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.messages (match_id, sender_profile_id, body)
+         values ($1, $2, '  padded  ') returning id`,
+        [msgMatchId, msgProfileA.id]
+      ),
+    'messages_body_valid'
+  );
+  // Empty / whitespace-only bodies are rejected.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.messages (match_id, sender_profile_id, body)
+         values ($1, $2, '') returning id`,
+        [msgMatchId, msgProfileA.id]
+      ),
+    'messages_body_valid'
+  );
+  // 2000 characters are accepted, 2001 are not.
+  await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, repeat('x', 2000)) returning id`,
+    [msgMatchId, msgProfileA.id]
+  );
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.messages (match_id, sender_profile_id, body)
+         values ($1, $2, repeat('x', 2001)) returning id`,
+        [msgMatchId, msgProfileA.id]
+      ),
+    'messages_body_valid'
+  );
+});
+
+test('58 · messaging: only participants of an ACTIVE match can SELECT messages', async () => {
+  await actAs(msgUserA.id);
+  assert.equal((await rows(`select id from public.messages`)).length, 2);
+
+  await actAs(msgUserB.id);
+  assert.equal((await rows(`select id from public.messages`)).length, 2);
+
+  // A verified nonparticipant sees nothing — no existence leak.
+  await actAs(msgUserC.id);
+  assert.equal((await rows(`select id from public.messages`)).length, 0);
+
+  await actAs(null);
+  await expectFailure(() => rows(`select * from public.messages`), 'permission denied');
+});
+
+test('59 · messaging: messages are immutable and unwritable for normal users', async () => {
+  await actAs(msgUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.messages (match_id, sender_profile_id, body)
+         values ($1, $2, 'client insert') returning id`,
+        [msgMatchId, msgProfileA.id]
+      ),
+    'permission denied'
+  );
+  await expectFailure(
+    () => rows(`update public.messages set body = 'edited' where match_id = $1`, [msgMatchId]),
+    'permission denied'
+  );
+  await expectFailure(
+    () => rows(`delete from public.messages where match_id = $1`, [msgMatchId]),
+    'permission denied'
+  );
+  // Unread counters on matches are backend-managed too (no UPDATE grant).
+  await expectFailure(
+    () => rows(`update public.matches set user_a_unread_count = 0 where id = $1`, [msgMatchId]),
+    'permission denied'
+  );
+});
+
+test('60 · messaging: the send RPC increments only the recipient counter', async () => {
+  await actAsService();
+  // The canonical pair order is decided by uuid sort — resolve the sides.
+  const sides = await one(
+    `select user_a_id, user_b_id from public.matches where id = $1`,
+    [msgMatchId]
+  );
+  const aIsUserA = sides.user_a_id === msgProfileA.id;
+  const senderCol = aIsUserA ? 'user_a_unread_count' : 'user_b_unread_count';
+  const recipientCol = aIsUserA ? 'user_b_unread_count' : 'user_a_unread_count';
+  const counters = async () =>
+    one(
+      `select user_a_unread_count, user_b_unread_count
+       from public.matches where id = $1`,
+      [msgMatchId]
+    );
+
+  let c = await counters();
+  assert.equal(c.user_a_unread_count, 0);
+  assert.equal(c.user_b_unread_count, 0);
+
+  // A sends to B: only B's counter ticks.
+  const first = await one(
+    `select * from public.send_conversation_message($1, $2, $3)`,
+    [msgMatchId, msgProfileA.id, 'first message']
+  );
+  assert.equal(first.body, 'first message');
+  assert.equal(first.sender_profile_id, msgProfileA.id);
+  c = await counters();
+  assert.equal(c[senderCol], 0);
+  assert.equal(c[recipientCol], 1);
+
+  // B replies: A's counter ticks instead.
+  await one(`select * from public.send_conversation_message($1, $2, $3)`, [
+    msgMatchId,
+    msgProfileB.id,
+    'second message',
+  ]);
+  c = await counters();
+  assert.equal(c.user_a_unread_count, 1);
+  assert.equal(c.user_b_unread_count, 1);
+
+  // Mark-read zeroes only the caller's own counter (service-role update).
+  await one(
+    `update public.matches set ${senderCol} = 0 where id = $1 returning 1`,
+    [msgMatchId]
+  );
+  c = await counters();
+  assert.equal(c[senderCol], 0);
+  assert.equal(c[recipientCol], 1);
+});
+
+test('61 · messaging: the send RPC is service-role only and enforces participants', async () => {
+  // Normal users have no EXECUTE grant — sending goes through the backend.
+  await actAs(msgUserA.id);
+  await expectFailure(
+    () =>
+      rows(`select * from public.send_conversation_message($1, $2, $3)`, [
+        msgMatchId,
+        msgProfileA.id,
+        'direct call',
+      ]),
+    'permission denied'
+  );
+
+  await actAsService();
+  // A nonparticipant sender is refused (and inserts nothing).
+  await expectFailure(
+    () =>
+      rows(`select * from public.send_conversation_message($1, $2, $3)`, [
+        msgMatchId,
+        msgProfileC.id,
+        'not mine',
+      ]),
+    'not an active participant'
+  );
+  assert.equal(
+    (await rows(`select id from public.messages where body = 'not mine'`)).length,
+    0
+  );
+});
+
+test('62 · messaging: unmatch makes the conversation inaccessible immediately', async () => {
+  // Before unmatch, B (participant of the active match) sees the full history.
+  await actAsService();
+  const total = (
+    await rows(`select id from public.messages where match_id = $1`, [msgMatchId])
+  ).length;
+  assert.ok(total >= 2, 'expected seeded history on the active match');
+
+  await actAs(msgUserB.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [msgMatchId])).length,
+    total
+  );
+
+  // The A<->C match is unmatched: C sees none of its (would-be) messages and
+  // the RPC refuses to send there.
+  await actAs(msgUserC.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [msgUnmatchedMatchId]))
+      .length,
+    0
+  );
+  await actAsService();
+  await expectFailure(
+    () =>
+      rows(`select * from public.send_conversation_message($1, $2, $3)`, [
+        msgUnmatchedMatchId,
+        msgProfileC.id,
+        'after unmatch',
+      ]),
+    'not an active participant'
+  );
+
+  // Now unmatch A<->B: both sides instantly lose read access.
+  await one(`update public.matches set unmatched_at = now() where id = $1 returning 1`, [
+    msgMatchId,
+  ]);
+  await actAs(msgUserA.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [msgMatchId])).length,
+    0
+  );
+  await actAs(msgUserB.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [msgMatchId])).length,
+    0
+  );
+
+  // The rows are retained, and the conversation comes back if the unmatch is
+  // cleared (mirrors the Phase 6 restore in test 53).
+  await actAsService();
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [msgMatchId])).length,
+    total
+  );
+  await one(`update public.matches set unmatched_at = null where id = $1 returning 1`, [
+    msgMatchId,
+  ]);
+  await actAs(msgUserB.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [msgMatchId])).length,
+    total
+  );
+});
+
+test('63 · messaging: keyset index exists; deleting a match cascades its messages', async () => {
+  await actAsService();
+  const indexes = await rows(`
+    select indexname from pg_indexes
+    where schemaname = 'public' and tablename = 'messages'
+  `);
+  assert.ok(
+    indexes.map((i) => i.indexname).includes('messages_match_id_created_at_idx'),
+    'expected the (match_id, created_at, id) keyset index'
+  );
+
+  // Deleting the match removes the conversation's messages with it.
+  const [smaller, larger] = [msgProfileB.id, msgProfileC.id].sort();
+  const temp = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smaller, larger]
+  );
+  await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'doomed') returning id`,
+    [temp.id, msgProfileB.id]
+  );
+  await rows(`delete from public.matches where id = $1`, [temp.id]);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [temp.id])).length,
+    0
+  );
+});

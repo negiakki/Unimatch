@@ -587,7 +587,7 @@ Soft-unmatches an active match. Only the two participants may unmatch: an
 unknown match, a nonparticipant's match, and an already-unmatched match all
 return **404 `not_found`** — no existence leak. `unmatched_at` is set
 server-side (the row is never deleted); both participants stop seeing the
-match immediately, and messaging access will be unavailable from Phase 7.
+match immediately, and its conversation becomes inaccessible immediately.
 
 ```json
 { "id": "0b8f7c2e-…", "unmatched_at": "2026-08-30T12:00:00+00:00" }
@@ -607,17 +607,124 @@ v1 (deferred); users cannot update or delete their own actions in v1.
 
 ### Messaging
 
-REST for history/sending; live transport is **Supabase Realtime**
-(messages, read receipts, typing/presence — not REST):
+REST for history/sending/read-markers. Live transport is **deferred**: v1
+polls the open conversation (~every 5s) — no Realtime, typing indicators,
+read receipts, attachments, or push notifications.
 
-| Area | Endpoint sketch | Notes |
+A conversation IS an active match: the match id doubles as the conversation
+id, so an unmatch makes the conversation inaccessible immediately (every
+endpoint returns 404 once `unmatched_at` is set). Messages are immutable text
+rows — no edit/delete path exists in v1.
+
+| Area | Endpoint | Notes |
 | --- | --- | --- |
-| Conversations | `GET /conversations` | Derived from active matches; unread counts included |
-| Messages history | `GET /conversations/{id}/messages` | Cursor-paginated; membership-checked |
-| Send message | `POST /conversations/{id}/messages` | Text-first; participant-checked |
-| Read marker | `POST /conversations/{id}/read` | Marks conversation read for caller |
+| Conversations | `GET /conversations` | **Implemented** — active matches + unread counts; contract below |
+| Messages history | `GET /conversations/{id}/messages` | **Implemented** — keyset-paginated, newest first; contract below |
+| Send message | `POST /conversations/{id}/messages` | **Implemented** — text-only, participant-checked; contract below |
+| Read marker | `POST /conversations/{id}/read` | **Implemented** — zeroes the caller's unread count; contract below |
 
-Exact payload shapes, pagination, and Realtime channel/naming conventions TBD.
+Every messaging endpoint requires the CALLER to be VERIFIED (403
+`permission_denied` otherwise). The matched partner is not re-checked per
+request — matches only ever form between verified profiles. Unknown match
+ids, nonparticipants, and unmatched matches all return **404 `not_found`**
+(no existence leak). Sender identity always derives from the bearer token;
+client-supplied ids carry no weight.
+
+#### `GET /api/v1/conversations`
+
+Returns the caller's conversations — their ACTIVE matches, newest first —
+each with the matched profile (the exact MatchCard shape) and the caller's
+unread count (messages the other side sent since the caller last marked the
+conversation read).
+
+```json
+{
+  "conversations": [
+    {
+      "id": "0b8f7c2e-…",
+      "created_at": "2026-08-30T10:00:00+00:00",
+      "unread_count": 2,
+      "profile": { "…same client-safe candidate shape as the discovery feed…": "…" }
+    }
+  ]
+}
+```
+
+Errors: `unauthorized` (401), `permission_denied` (403, unverified caller),
+`database_unavailable` / `storage_signing_failed` (503).
+
+#### `GET /api/v1/conversations/{conversation_id}/messages`
+
+One page of a conversation's message history, **newest first**. Keyset
+pagination on `(created_at, id)`:
+
+* `limit` — page size, default 30, max 100 (422 outside 1..100).
+* `cursor` — opaque cursor from the previous page's `next_cursor`; the next
+  page is strictly OLDER than the cursor tuple, so paging is stable while new
+  messages arrive. Clients poll page 1 (no cursor) for updates.
+
+```json
+{
+  "messages": [
+    {
+      "id": "9e2c…",
+      "sender_profile_id": "33333333-…",
+      "is_own": true,
+      "body": "Hey! Want to grab coffee?",
+      "created_at": "2026-08-30T12:00:00.123456+00:00"
+    }
+  ],
+  "next_cursor": "eyJjIjoiMjAyNi0wOC0zMFQxMjowMC…"
+}
+```
+
+A full page always emits `next_cursor`; the follow-up fetch (possibly empty)
+ends the walk. `is_own` is computed server-side from the token.
+
+Errors: `unauthorized` (401), `permission_denied` (403, unverified caller),
+`not_found` (404, unknown / nonparticipant / unmatched conversation),
+`validation_error` (422, malformed id, bad cursor, bad limit),
+`database_unavailable` (503).
+
+#### `POST /api/v1/conversations/{conversation_id}/messages`
+
+Sends one text message (201). The body is trimmed server-side and must be
+1–2000 characters after trimming (422 `validation_error` otherwise); messages
+are immutable once sent. One atomic backend operation inserts the message AND
+increments the recipient's unread counter.
+
+Request / response:
+
+```json
+// request
+{ "body": "Hey! Want to grab coffee?" }
+
+// 201 response
+{
+  "id": "9e2c…",
+  "sender_profile_id": "33333333-…",
+  "is_own": true,
+  "body": "Hey! Want to grab coffee?",
+  "created_at": "2026-08-30T12:00:00.123456+00:00"
+}
+```
+
+Errors: `unauthorized` (401), `permission_denied` (403, unverified caller),
+`not_found` (404, unknown / nonparticipant / unmatched conversation),
+`validation_error` (422, missing/empty-after-trim/over-2000-characters body),
+`database_insert_failed` / `database_unavailable` (503).
+
+#### `POST /api/v1/conversations/{conversation_id}/read`
+
+Marks the conversation read for the CALLER (zeroes their per-participant
+unread counter; idempotent). The other participant's counter is untouched.
+
+```json
+{ "conversation_id": "0b8f7c2e-…", "unread_count": 0 }
+```
+
+Errors: same as the history endpoint (`database_update_failed` instead of
+`database_unavailable` on write failure, 503).
 
 ### Moderation / safety
 

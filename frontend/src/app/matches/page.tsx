@@ -114,6 +114,12 @@ function MatchCard({
             {profile.course}
           </p>
         )}
+        <Link
+          href={`/messages/${entry.id}`}
+          className={`shrink-0 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+        >
+          Message
+        </Link>
         <button
           type="button"
           onClick={() => void handleUnmatch()}
@@ -163,14 +169,22 @@ export default function MatchesPage() {
   return (
     <main className="mx-auto w-full max-w-lg px-5 pb-16">
       <section className="pt-10">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <h1 className="text-3xl font-bold tracking-tight">Matches</h1>
-          <Link
-            href="/discovery"
-            className={`rounded-xl border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-          >
-            Discover
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/messages"
+              className={`rounded-xl border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+            >
+              Messages
+            </Link>
+            <Link
+              href="/discovery"
+              className={`rounded-xl border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+            >
+              Discover
+            </Link>
+          </div>
         </div>
 
         {phase === "loading" && (
