@@ -71,6 +71,12 @@ set public             = excluded.public,
 -- (select auth.uid()) is wrapped in a subselect so the plan evaluates it once.
 -- ---------------------------------------------------------------------------
 
+-- Drop-first: makes the migration idempotent against remote databases that
+-- already contain these policies (e.g. applied out-of-band or via the
+-- dashboard), while recreating them with the exact intended definition below.
+drop policy if exists "profile_photos_storage_select_own" on storage.objects;
+drop policy if exists "profile_photos_storage_insert_own" on storage.objects;
+
 create policy "profile_photos_storage_select_own"
   on storage.objects for select to authenticated
   using (
