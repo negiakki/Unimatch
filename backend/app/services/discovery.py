@@ -108,11 +108,14 @@ def get_discovery_feed(
     }
 
 
-def _get_verified_viewer(supabase: Client, auth_user_id: UUID) -> dict[str, Any]:
+def _get_verified_viewer(
+    supabase: Client, auth_user_id: UUID, *, action: str = "use the discovery feed"
+) -> dict[str, Any]:
     """Resolve the token-owned profile and require it to be VERIFIED.
 
     A caller with no profile is not VERIFIED, so both cases surface the same
-    403 `permission_denied` — no existence leak about profiles.
+    403 `permission_denied` — no existence leak about profiles. `action`
+    customizes the error copy for the consuming slice (messaging, dating…).
     """
     try:
         response = (
@@ -130,13 +133,9 @@ def _get_verified_viewer(supabase: Client, auth_user_id: UUID) -> dict[str, Any]
         ) from exc
     viewer = getattr(response, "data", response)
     if not viewer:
-        raise PermissionDeniedError(
-            "Verification is required to use the discovery feed."
-        )
+        raise PermissionDeniedError(f"Verification is required to {action}.")
     if not _is_verified(supabase, viewer["id"]):
-        raise PermissionDeniedError(
-            "Verification is required to use the discovery feed."
-        )
+        raise PermissionDeniedError(f"Verification is required to {action}.")
     return viewer
 
 
