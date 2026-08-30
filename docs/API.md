@@ -15,7 +15,8 @@ All endpoints are versioned under `/api/v1`.
   `{ "error": { "code": "...", "message": "..." } }`
 - Known codes today: `internal_error` (500), `validation_error` (422),
   `bad_request` (400), `unauthorized` (401), `permission_denied` (403),
-  `not_found` (404), `method_not_allowed` (405), `conflict` (409).
+  `not_found` (404), `method_not_allowed` (405), `conflict` (409),
+  `already_decided` (409), `database_unavailable` (503).
   More codes will be added as modules land.
 - CORS origins are configured via the backend's `CORS_ORIGINS` setting.
 - Authentication: all endpoints except Health require a valid Supabase Auth
@@ -384,23 +385,225 @@ submission), `invalid_state_transition` (409, submission is not `PENDING`),
 
 | Area | Endpoint sketch | Notes |
 | --- | --- | --- |
-| Eligible candidate feed | `GET /discovery/feed` | Applies full exclusion list + preferences (age range ≥ 18+, gender preference); deterministic ranking; cursor pagination TBD |
+| Eligible candidate feed | `GET /discovery/feed` | **Implemented** — verified-only feed; deterministic ordering; cursor pagination; contract below |
+| Like a candidate | `POST /discovery/{profile_id}/like` | **Implemented** — creates the match on a mutual like; contract below |
+| Pass a candidate | `POST /discovery/{profile_id}/pass` | **Implemented** — contract below |
 
-### Dating actions
+Age-range preferences, blocks, location filtering, and AI
+recommendation/ranking are **not** part of this phase.
+
+#### `GET /api/v1/discovery/feed`
+
+Returns an ordered, cursor-paginated feed of eligible candidate profiles for
+the **authenticated, VERIFIED** viewer.
+
+Authentication: required. The viewer is derived **exclusively** from the
+Supabase Auth bearer token (the existing `CurrentAuthenticatedUser`
+dependency) — the backend resolves the viewer's profile server-side.
+Client-supplied `auth_user_id` or viewer `profile_id` values are never
+accepted and carry no authorization weight.
+
+Gate: the viewer must be VERIFIED (latest verification submission). An
+unverified viewer (including one with no profile) receives **403
+`permission_denied`** — no existence leak.
+
+Query parameters:
+
+| Param | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `limit` | int | `20` | Page size, `1..50` (422 outside this range). |
+| `cursor` | opaque string | omitted | The previous page's `next_cursor`; omitted for the first page. |
+
+Candidate eligibility (this phase):
+
+- candidate is not the current user;
+- candidate has a profile;
+- candidate is VERIFIED;
+- candidate's gender is compatible with the viewer's `seeking_gender`;
+- viewer's gender is compatible with the candidate's `seeking_gender`
+  (two-sided);
+- `seeking_gender = everyone` imposes no restriction on that side;
+- neither side has both decided: candidates the VIEWER has already acted on
+  (any `LIKE`/`PASS`) are removed from the feed — the exclusion is
+  viewer-scoped. Candidates who acted on the viewer remain discoverable so
+  the mutual like can form the match (Phase 6).
+
+Ordering is **deterministic and explainable**: newest profiles first
+(`created_at` descending), `id` ascending as a stable tiebreaker. No random
+ordering. Response `200`:
+
+```json
+{
+  "candidates": [
+    {
+      "id": "0b8f7c2e-…",
+      "first_name": "Jamie",
+      "age": 23,
+      "university": {
+        "id": "…",
+        "name": "State University",
+        "city": "College Town",
+        "state": "CA",
+        "country": "USA"
+      },
+      "course": "Computer Science",
+      "academic_year": 3,
+      "gender": "man",
+      "bio": "CS student who loves hiking.",
+      "relationship_intent": "serious",
+      "height_cm": 180,
+      "hometown": "Springfield",
+      "interests": [
+        { "id": "0b8f7c2e-…", "name": "Hiking" }
+      ],
+      "profile_prompts": [ { "prompt": "…", "answer": "…" } ],
+      "photos": [
+        { "id": "…", "url": "https://<project>.supabase.co/storage/v1/object/sign/profile-photos/…", "is_primary": true }
+      ]
+    }
+  ],
+  "next_cursor": "…"
+}
+```
+
+Response contract / security:
+
+- `age` is **derived** from `date_of_birth` server-side; the raw
+  `date_of_birth` is **never** returned.
+- `university` is `{ id, name, city, state, country }`.
+- `photos[].url` is a **short-lived signed URL** generated server-side with
+  the service-role client against the private `profile-photos` bucket; the
+  `storage_path` is read server-side and **never** returned.
+- **Never exposed**: `auth_user_id`, `seeking_gender`, verification status
+  strings / submissions / documents, `storage_path`, `created_at`,
+  `updated_at`.
+- `next_cursor` is `null` when no further candidates exist; otherwise it is an
+  opaque token passed back as `cursor` to fetch the next page.
+
+Errors: `unauthorized` (401, missing/invalid token), `permission_denied` (403,
+authenticated but not VERIFIED / no profile), `validation_error` (422, `limit`
+outside 1..50 or a malformed `cursor`), `database_unavailable` /
+`storage_signing_failed` (503).
+
+#### `POST /api/v1/discovery/{profile_id}/like`
+
+Records the authenticated viewer's `LIKE` on the candidate profile identified
+by the URL path — the only client-supplied identifier. There is no body and
+no client-supplied actor field: the actor is resolved server-side from the
+bearer token, so actor spoofing is structurally impossible.
+
+Gate: viewer must be VERIFIED (403 `permission_denied` otherwise, including a
+viewer with no profile — no existence leak). The target must exist, be
+VERIFIED, and not be the viewer themselves: self, unknown, and unverified
+targets all return **404 `not_found`** — no existence leak.
+
+Exactly one immutable action exists per viewer/candidate pair: a LIKE on an
+already-liked OR already-passed candidate returns **409
+`already_decided`** (a LIKE after PASS is the same rejection; actions cannot
+be updated or deleted by users in v1).
+
+On a mutual LIKE (the candidate had already liked the viewer) the canonical
+match is created server-side exactly once — concurrent mutual likes cannot
+produce duplicate matches (unique pair constraint + conflict-ignore insert).
+The response is either:
+
+```json
+{ "outcome": "like_recorded" }
+```
+
+or, when the match was just created (or already exists under concurrency):
+
+```json
+{
+  "outcome": "matched",
+  "match": {
+    "id": "0b8f7c2e-…",
+    "created_at": "2026-08-30T10:00:00+00:00",
+    "profile": { "…same client-safe candidate shape as the discovery feed…": "…" }
+  }
+}
+```
+
+The matched profile carries the same client-safe fields as a discovery
+candidate (age derived from date_of_birth; signed photo URLs; never
+`auth_user_id`, `date_of_birth`, verification status strings, or
+`storage_path`).
+
+Errors: `unauthorized` (401), `permission_denied` (403, unverified viewer /
+no profile), `not_found` (404, self / unknown / unverified target),
+`already_decided` (409, the viewer already acted on this target in either
+direction), `validation_error` (422, malformed `profile_id`),
+`database_unavailable` / `database_insert_failed` (503).
+
+#### `POST /api/v1/discovery/{profile_id}/pass`
+
+Records the authenticated viewer's `PASS`. Identical gate, target, 404, 409,
+and immutability rules as the like endpoint; a PASS can never create a match.
+
+```json
+{ "outcome": "pass_recorded" }
+```
+
+Errors: same as the like endpoint.
+
+### Matches
 
 | Area | Endpoint sketch | Notes |
 | --- | --- | --- |
-| Like / Pass | `POST /actions/{target_user_id}` body `{type: LIKE \| PASS}` (or split endpoints — TBD) | Rejects acting on already-decided candidates; creates match server-side on mutual like |
+| List my active matches | `GET /matches` | **Implemented** — participant-visible only; contract below |
+| Unmatch | `DELETE /matches/{match_id}` | **Implemented** — participant-only soft unmatch; contract below |
 
-Super Like and Undo/Rewind have no endpoints in v1 (deferred).
+Match detail (`GET /matches/{match_id}`) is not exposed in this phase.
 
-### Matching
+#### `GET /api/v1/matches`
 
-| Area | Endpoint sketch | Notes |
-| --- | --- | --- |
-| List my matches | `GET /matches` | Participant-visible only |
-| Match detail | `GET /matches/{match_id}` | |
-| Unmatch | `DELETE /matches/{match_id}` | Hides conversation/messages from both users immediately |
+Returns the caller's ACTIVE matches, newest first. Only the two participants
+can ever see a match; other users receive an empty list (no existence leak).
+
+```json
+{
+  "matches": [
+    {
+      "id": "0b8f7c2e-…",
+      "created_at": "2026-08-30T10:00:00+00:00",
+      "profile": { "…same client-safe candidate shape as the discovery feed…": "…" }
+    }
+  ]
+}
+```
+
+`profile` is the OTHER participant as a client-safe projection (identical
+shape to a discovery candidate). Unmatched matches are never returned; the
+match row is retained server-side so an unmatched pair cannot rematch through
+normal discovery. "Who liked you" does not exist — incoming likes are never
+readable.
+
+Errors: `unauthorized` (401), `permission_denied` (403, unverified viewer / no
+profile), `database_unavailable` / `storage_signing_failed` (503).
+
+#### `DELETE /api/v1/matches/{match_id}`
+
+Soft-unmatches an active match. Only the two participants may unmatch: an
+unknown match, a nonparticipant's match, and an already-unmatched match all
+return **404 `not_found`** — no existence leak. `unmatched_at` is set
+server-side (the row is never deleted); both participants stop seeing the
+match immediately, and messaging access will be unavailable from Phase 7.
+
+```json
+{ "id": "0b8f7c2e-…", "unmatched_at": "2026-08-30T12:00:00+00:00" }
+```
+
+Errors: `unauthorized` (401), `permission_denied` (403, unverified viewer),
+`not_found` (404, unknown / nonparticipant / already-unmatched match),
+`validation_error` (422, malformed `match_id`), `database_unavailable` /
+`database_update_failed` (503).
+
+### Dating actions (superseded)
+
+The generic `POST /actions/{target_user_id}` sketch was replaced by the
+split like/pass endpoints above — target identity comes from the URL path,
+never from a request body. Super Like and Undo/Rewind have no endpoints in
+v1 (deferred); users cannot update or delete their own actions in v1.
 
 ### Messaging
 

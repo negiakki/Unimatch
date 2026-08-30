@@ -277,7 +277,7 @@ export function PhotoManager() {
     return (
       <div aria-busy="true" aria-live="polite">
         <span className="sr-only">Loading your photos</span>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {Array.from({ length: 3 }).map((_, index) => (
             <div
               key={index}
@@ -327,8 +327,13 @@ export function PhotoManager() {
           {photos.length} of {maxPhotos}
         </p>
       </div>
+      <p className="mt-2 text-[15px] leading-relaxed text-ink">
+        Your primary photo is the first one people see in Discovery. Tap the{" "}
+        <StarIcon className="inline-block size-3.5 -translate-y-px text-accent" />{" "}
+        on any photo to make it primary.
+      </p>
 
-      <div className="mt-3 grid grid-cols-3 gap-3">
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
         {photos.map((photo, index) => {
           const busy = mutatingId === photo.id;
           return (
@@ -342,7 +347,7 @@ export function PhotoManager() {
                   alt={`Profile photo ${index + 1}`}
                   fill
                   unoptimized
-                  sizes="(max-width: 448px) 33vw, 130px"
+                  sizes="(max-width: 640px) 50vw, 200px"
                   className="object-cover"
                 />
               ) : (
@@ -459,8 +464,8 @@ export function PhotoManager() {
         {uploading ? "Uploading your photo" : ""}
       </p>
       <p className="mt-3 text-xs leading-relaxed text-muted">
-        Your first photo is your primary photo. Drag a file onto the tile or
-        tap to browse. JPEG, PNG, or WebP · up to 10 MB.
+        Drag a file onto a tile or tap to browse. JPEG, PNG, or WebP · up to
+        10 MB.
       </p>
     </div>
   );

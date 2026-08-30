@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -491,6 +492,12 @@ export function VerificationFlow() {
                 Verified on {verifiedAt}
               </p>
             )}
+            <Link
+              href="/discovery"
+              className={`mt-8 inline-block w-full rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+            >
+              Start discovering
+            </Link>
           </section>
         );
         break;

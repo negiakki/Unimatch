@@ -42,14 +42,37 @@ authoritative specification.
 
 ## Phase 5 — Discovery
 
-- Eligible-candidate feed enforcing the full exclusion list + preferences
-- Deterministic, explainable ranking; cursor pagination
+- Database: `is_profile_verified` / `is_current_user_verified` boolean helpers +
+  cross-user SELECT RLS policies (profiles, photos, interests) — **implemented**
+- Backend: `GET /api/v1/discovery/feed` — verified-only, two-sided gender
+  compatibility, deterministic ordering (newest first + id tiebreaker), cursor
+  pagination, signed photo URLs, client-safe response — **implemented**
+- Supabase SQL tests + focused backend tests — **implemented**
+- Deferred to later phases: blocks, age-range preferences, likes/passes,
+  matches, location filtering, AI recommendations
 
-## Phase 6 — Like/pass/matching
+## Phase 6 — Like/pass/matching ✅ (complete)
 
-- `LIKE` / `PASS` actions; already-decided rejection handling
-- Mutual-like match creation with dedupe; matches list
-- Unmatch behavior incl. conversation hiding
+- ONE `dating_actions` table for `LIKE`/`PASS` — exactly one immutable action
+  per (viewer, candidate) pair; self-actions, duplicates, and direction
+  flips (LIKE after PASS) rejected; actor identity resolved from the token,
+  never client input — **implemented**
+- Mutual-like match creation with dedupe: canonical pair ordering +
+  unique pair constraint as the concurrency arbiter; matches stored
+  explicitly; participant-only visibility — **implemented**
+- `POST /discovery/{profile_id}/like`, `POST /discovery/{profile_id}/pass`,
+  `GET /matches`, `DELETE /matches/{match_id}` (participant-only soft
+  unmatch) — **implemented**
+- Discovery feed excludes candidates already acted on by either side
+  (batched, no N+1); VERIFIED gate + gender preference + deterministic
+  ordering + cursor pagination preserved — **implemented**
+- Frontend: Pass/Like buttons (non-gesture fallback), swipe left/right,
+  submitting states + double-submit prevention, match celebration modal
+  ("Keep discovering" / "View matches"), `/matches` list page with unmatch —
+  **implemented**
+- Deferred to later phases: messaging (conversations + "Send message" on the
+  match modal), blocks/reports, age-range/location preferences,
+  Super Like/Undo, "who liked you"
 
 ## Phase 7 — Messaging
 

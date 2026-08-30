@@ -4,20 +4,25 @@
 > `interests`, `profile_interests`, `profile_photos` — migration
 > `20260827120000_core_schema.sql`), **student-ID verification slice
 > implemented** (`staff_admins`, `verification_submissions`,
-> `verification_reviews` — migration `20260827130000_verification.sql`), and
+> `verification_reviews` — migration `20260827130000_verification.sql`),
 > **profile-photo Storage implemented** (private `profile-photos` bucket —
-> migration `20260827150000_profile_photos_storage.sql`). Dating, matching,
+> migration `20260827150000_profile_photos_storage.sql`), **VERIFIED-gate
+> discovery slice implemented** (migration `20260829120000_discovery.sql`),
+> and **likes/passes/matches slice implemented** (`dating_actions`,
+> `matches` — migration `20260830120000_likes_matches.sql`). Conversations,
 > messaging, safety, and notification tables are **not yet implemented**;
 > the requirements for those remain design targets in this document.
 
 ## How the schema is managed
 
 - PostgreSQL via Supabase; migrations live in `supabase/migrations/` and are
-  applied with the Supabase CLI. Exactly three migrations exist so far
+  applied with the Supabase CLI. Exactly seven migrations exist so far
   (`20260827120000_core_schema.sql`, `20260827130000_verification.sql`,
   `20260827140000_verification_storage.sql`,
-  `20260827150000_profile_photos_storage.sql`); later slices do **not**
-  modify earlier migrations.
+  `20260827150000_profile_photos_storage.sql`,
+  `20260829120000_discovery.sql`, `20260830120000_likes_matches.sql`,
+  `20260830130000_dating_service_role_grants.sql`);
+  later slices do **not** modify earlier migrations.
 - Development seed data (fictional universities + interests only) lives in
   `supabase/seed.sql`; the Supabase CLI applies it after migrations on
   `supabase db reset`. It is idempotent (`on conflict do nothing`).
@@ -446,28 +451,104 @@ cross-bucket denial, anon denial (reads return nothing; writes are rejected),
 the absence of update/delete paths for normal users, and the one-row-per-
 object `storage_path` uniqueness.
 
+## Implemented — likes/passes/matches slice
+
+### Tables
+
+#### `dating_actions` — one immutable LIKE/PASS per (actor, target) pair
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | default `gen_random_uuid()` |
+| `actor_profile_id` | uuid NOT NULL | FK → `profiles(id)` ON DELETE CASCADE |
+| `target_profile_id` | uuid NOT NULL | FK → `profiles(id)` ON DELETE CASCADE |
+| `action_type` | text NOT NULL | CHECK: exactly `LIKE` / `PASS` |
+| `created_at` | timestamptz NOT NULL | default `now()` |
+
+- ONE table for both actions. `UNIQUE (actor_profile_id, target_profile_id)`
+  makes a duplicate — including a LIKE after a PASS or a PASS after a LIKE —
+  impossible at the database level. Actions are viewer-scoped: acting on
+  someone never affects the reverse direction.
+- `CHECK (actor_profile_id <> target_profile_id)` rejects self-actions.
+- No `updated_at`: actions are immutable for normal users in v1 (no
+  UPDATE/DELETE grants or policies; only the service role can maintain them).
+- Index: `dating_actions_target_profile_id_idx` (supports incoming-direction
+  lookups, e.g. future surfaces over actions); the unique constraint doubles
+  as the actor-direction index used by feed exclusion.
+
+#### `matches` — explicit mutual-like records, canonically ordered
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | default `gen_random_uuid()` |
+| `user_a_id` | uuid NOT NULL | FK → `profiles(id)` ON DELETE CASCADE; the SMALLER of the two profile ids |
+| `user_b_id` | uuid NOT NULL | FK → `profiles(id)` ON DELETE CASCADE; the LARGER of the two profile ids |
+| `created_at` | timestamptz NOT NULL | default `now()` |
+| `unmatched_at` | timestamptz NULL | set by the backend on unmatch; NULL while active |
+
+- Canonical pair ordering: `CHECK (user_a_id < user_b_id)` (no self-match
+  falls out of the same check), plus `UNIQUE (user_a_id, user_b_id)` — the
+  pair is the identity of the match, and the unique constraint is the
+  concurrency arbiter for mutual-like dedupe.
+- `CHECK (unmatched_at IS NULL OR unmatched_at >= created_at)`.
+- Unmatching is a **soft transition**: the row is retained so an unmatched
+  pair cannot rematch through normal discovery; the matches list shows only
+  active rows.
+- Index: `matches_user_b_id_idx` (participant lookup on both pair sides).
+
+### Row Level Security (likes/passes/matches slice)
+
+RLS is enabled on both tables (deny-by-default). Policies:
+
+| Table | Policies |
+| --- | --- |
+| `dating_actions` | `INSERT` for `authenticated` only when `actor_profile_id` resolves to `auth.uid()` via `profiles`, the caller is VERIFIED (`is_current_user_verified()`), and the target is a VERIFIED profile (`is_profile_verified(target_profile_id)`). `SELECT` only the caller's own OUTGOING actions. **No UPDATE/DELETE policies.** |
+| `matches` | `SELECT` when the caller is one of the two participants (resolved via `profiles.auth_user_id`). **No INSERT/UPDATE/DELETE policies.** |
+
+Supporting behavior:
+
+- A client cannot spoof `actor_profile_id` — the INSERT policy resolves the
+  actor from `auth.uid()`, never from the payload.
+- Incoming likes/passes are never visible to normal users ("who liked you"
+  does not exist): the SELECT policy filters on the actor side only.
+- Normal users hold **no UPDATE/DELETE grant** on `dating_actions` and **no
+  write grants at all** on `matches`; `anon` has no grants on either table.
+- Match creation and unmatch run exclusively through the backend's
+  service-role client (which bypasses RLS): match rows are inserted in
+  canonical order with a conflict-ignore upsert so concurrent mutual likes
+  converge on exactly one row; unmatch is a service-role UPDATE of
+  `unmatched_at`.
+- Verification-state disclosure is unchanged: the policies reuse the existing
+  `is_profile_verified` / `is_current_user_verified` boolean helpers, which
+  reveal nothing beyond the verified/unverified bit.
+
+### Testing (likes/passes/matches slice)
+
+The shared harness (`supabase/tests/`) covers, for this slice: the
+self-action CHECK, the one-action-per-pair unique constraint (LIKE after PASS
+included), the `action_type` CHECK, verified-viewer insert rules (spoofed
+actor, unverified viewer, unverified target, anonymous denial), incoming-action
+invisibility, missing UPDATE/DELETE grants, canonical pair ordering, pair
+uniqueness, the no-self-match rule, `unmatched_at`/`created_at` consistency,
+server-only match writes, participant-only match visibility (nonparticipants
+and anon see nothing), FK cascade behavior for actions and matches, and the
+presence of both action-direction indexes.
+
 ## Requirements for future slices (NOT implemented yet)
 
 The entities below remain **requirements only** — do not treat them as
-existing tables. (Verification and its audit trail are implemented above.)
+existing tables. (Verification, its audit trail, and the dating
+likes/passes/matches core are implemented above.)
 
-### Dating core
+### Messaging core
 
-6. **Likes** — actor → target action records used both for discovery
-   exclusion and mutual-match detection. A pair cannot accumulate
-   conflicting/duplicate active likes (exact constraint TBD).
-7. **Passes** — actor → target "decline" records excluding targets from the
-   feed. v1 treats passes as final (open question in PRD).
-8. **Matches** — created when two eligible users mutually like each other;
-   unordered participant pair with at-most-one-active-match dedupe;
-   visibility limited to participants; tracks unmatched state.
-9. **Conversations** — message containers for matches (likely 1:1 with an
+6. **Conversations** — message containers for matches (likely 1:1 with an
    active match; final modeling TBD).
-10. **Messages** — text messages within conversations: sender (participant),
-    server-assigned timestamp/conversation ordering; participants-only
-    readability enforced by policy; inaccessible after unmatch/block while
-    retained per safety/retention rules. Typing indicators are **not**
-    persisted (ephemeral via Realtime).
+7. **Messages** — text messages within conversations: sender (participant),
+   server-assigned timestamp/conversation ordering; participants-only
+   readability enforced by policy; inaccessible after unmatch/block while
+   retained per safety/retention rules. Typing indicators are **not**
+   persisted (ephemeral via Realtime).
 
 ### Safety
 
@@ -493,8 +574,9 @@ existing tables. (Verification and its audit trail are implemented above.)
 - Deletion propagation: removing an account cascades/anonymizes across
   profiles, photos, verifications, likes, passes, matches, conversations,
   messages consistent with retention rules (TBD). The core slice already
-  cascades `auth.users → profiles → photos/interests`, and the verification
-  slice cascades `profiles → submissions → audit records`.
+  cascades `auth.users → profiles → photos/interests`, the verification
+  slice cascades `profiles → submissions → audit records`, and the
+  likes/passes/matches slice cascades `profiles → actions/matches`.
 - Storage object references remain valid or clean up atomically with rows;
   Storage-side object deletion accompanies row deletion in the app layer.
 - Verification states are exactly `PENDING`, `VERIFIED`, `REJECTED`; the

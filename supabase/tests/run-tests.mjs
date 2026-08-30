@@ -204,7 +204,7 @@ let submissionV2; // V's resubmission (PENDING -> VERIFIED)
 // Tests
 // ============================================================================
 
-test('01 · migrations create exactly the eight expected tables on a clean database', async () => {
+test('01 · migrations create exactly the ten expected tables on a clean database', async () => {
   const t = await rows(`
     select table_name from information_schema.tables
     where table_schema = 'public' and table_type = 'BASE TABLE'
@@ -212,7 +212,9 @@ test('01 · migrations create exactly the eight expected tables on a clean datab
   assert.deepEqual(
     t.map((r) => r.table_name).sort(),
     [
+      'dating_actions',
       'interests',
+      'matches',
       'profile_interests',
       'profile_photos',
       'profiles',
@@ -230,7 +232,7 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'r'
   `);
-  assert.equal(tables.length, 8);
+  assert.equal(tables.length, 10);
   for (const t of tables) {
     assert.equal(t.relrowsecurity, true, `${t.relname} must have RLS enabled`);
   }
@@ -242,12 +244,14 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
   const byTable = Object.fromEntries(policies.map((p) => [p.tablename, p.n]));
   assert.equal(byTable['universities'], 1);
   assert.equal(byTable['interests'], 1);
-  assert.equal(byTable['profiles'], 4);
-  assert.equal(byTable['profile_interests'], 4);
-  assert.equal(byTable['profile_photos'], 4);
+  assert.equal(byTable['profiles'], 5); // 4 owner + profiles_select_verified
+  assert.equal(byTable['profile_interests'], 5); // 4 owner + _select_verified
+  assert.equal(byTable['profile_photos'], 5); // 4 owner + _select_verified
   assert.equal(byTable['staff_admins'], 1);
   assert.equal(byTable['verification_submissions'], 3);
   assert.equal(byTable['verification_reviews'], 1);
+  assert.equal(byTable['dating_actions'], 2); // insert_own + select_own_outgoing
+  assert.equal(byTable['matches'], 1); // select_participant
 });
 
 test('03 · profile links 1:1 to the auth user (owner can create and read it)', async () => {
@@ -1300,3 +1304,520 @@ test('36 · storage: profile photo rows and objects are linked but independently
     'profile_photos_storage_path_key'
   );
 });
+
+// ============================================================================
+// Discovery slice tests
+// ============================================================================
+
+// Discovery fixtures are created inside the first discovery test (service
+// context) and shared through module-scoped variables, so tests never depend
+// on module-evaluation order or leave stray roles behind.
+let discUserV, discUserPending, discUserRejected, discUserNone;
+let discProfileV, discProfilePending, discProfileRejected, discProfileNone;
+
+test('37 · discovery: is_profile_verified returns true for VERIFIED, false otherwise', async () => {
+  await actAsService();
+  discUserV = await one(`insert into auth.users (email) values ('disc-v@example.test') returning id`);
+  discUserPending = await one(`insert into auth.users (email) values ('disc-pending@example.test') returning id`);
+  discUserRejected = await one(`insert into auth.users (email) values ('disc-rejected@example.test') returning id`);
+  discUserNone = await one(`insert into auth.users (email) values ('disc-none@example.test') returning id`);
+
+  discProfileV = await one(
+    `insert into public.profiles ${PROFILE_COLUMNS}
+     values ($1, 'DiscV', current_date - interval '20 years', $2,
+             'Computer Science', 2, 'woman', 'everyone', 'Discovery verified')
+     returning id`,
+    [discUserV.id, university.id]
+  );
+  discProfilePending = await one(
+    `insert into public.profiles ${PROFILE_COLUMNS}
+     values ($1, 'DiscP', current_date - interval '20 years', $2,
+             'Computer Science', 2, 'woman', 'everyone', 'Discovery pending')
+     returning id`,
+    [discUserPending.id, university.id]
+  );
+  discProfileRejected = await one(
+    `insert into public.profiles ${PROFILE_COLUMNS}
+     values ($1, 'DiscR', current_date - interval '20 years', $2,
+             'Computer Science', 2, 'woman', 'everyone', 'Discovery rejected')
+     returning id`,
+    [discUserRejected.id, university.id]
+  );
+  discProfileNone = await one(
+    `insert into public.profiles ${PROFILE_COLUMNS}
+     values ($1, 'DiscN', current_date - interval '20 years', $2,
+             'Computer Science', 2, 'woman', 'everyone', 'Discovery no-sub')
+     returning id`,
+    [discUserNone.id, university.id]
+  );
+
+  const subDiscV = await one(
+    `insert into public.verification_submissions (profile_id, storage_path)
+     values ($1, 'student-ids/disc/v.jpg') returning id`,
+    [discProfileV.id]
+  );
+  await one(
+    `update public.verification_submissions
+     set status = 'VERIFIED', reviewer_id = $1
+     where id = $2 returning id`,
+    [userStaff.id, subDiscV.id]
+  );
+  await one(
+    `insert into public.verification_submissions (profile_id, storage_path)
+     values ($1, 'student-ids/disc/pending.jpg') returning id`,
+    [discProfilePending.id]
+  );
+  const subDiscRejected = await one(
+    `insert into public.verification_submissions (profile_id, storage_path)
+     values ($1, 'student-ids/disc/rejected.jpg') returning id`,
+    [discProfileRejected.id]
+  );
+  await one(
+    `update public.verification_submissions
+     set status = 'REJECTED', reviewer_id = $1, rejection_reason = 'Disc test rejection'
+     where id = $2 returning id`,
+    [userStaff.id, subDiscRejected.id]
+  );
+  await one(
+    `insert into public.profile_photos (profile_id, storage_path, position, is_primary)
+     values ($1, 'disc/v/photo-1.jpg', 1, true) returning id`,
+    [discProfileV.id]
+  );
+
+  // Authenticated (non-service) caller may call the helper.
+  await actAs(discUserNone.id);
+  assert.equal((await rows(`select public.is_profile_verified($1) as v`, [profileV.id]))[0].v, true);
+  assert.equal((await rows(`select public.is_profile_verified($1) as v`, [discProfileV.id]))[0].v, true);
+  assert.equal((await rows(`select public.is_profile_verified($1) as v`, [discProfilePending.id]))[0].v, false);
+  assert.equal((await rows(`select public.is_profile_verified($1) as v`, [discProfileRejected.id]))[0].v, false);
+  assert.equal(
+    (await rows(`select public.is_profile_verified('00000000-0000-0000-0000-000000000000') as v`))[0].v,
+    false
+  );
+  assert.equal((await rows(`select public.is_profile_verified($1) as v`, [discProfileNone.id]))[0].v, false);
+});
+
+test('38 · discovery: verified users can SELECT other verified profiles', async () => {
+  await actAs(userV.id); // VERIFIED viewer
+  const visible = await rows(`select id, first_name from public.profiles`);
+  const ids = visible.map((r) => String(r.id));
+  // Own profile is visible (owner policy).
+  assert.ok(ids.includes(String(profileV.id)));
+  // Another verified profile is visible (new cross-read policy).
+  assert.ok(ids.includes(String(discProfileV.id)));
+  // Unverified profiles are NOT visible.
+  assert.equal(ids.includes(String(discProfilePending.id)), false);
+  assert.equal(ids.includes(String(discProfileRejected.id)), false);
+  assert.equal(ids.includes(String(discProfileNone.id)), false);
+  assert.equal(ids.includes(String(profileW.id)), false);
+});
+
+test('39 · discovery: unverified users cannot cross-read profiles', async () => {
+  // discUserNone has no verification submissions → unverified.
+  await actAs(discUserNone.id);
+  const visible = await rows(`select id from public.profiles`);
+  const ids = visible.map((r) => String(r.id));
+  assert.deepEqual(ids, [String(discProfileNone.id)]);
+
+  // A PENDING user also cannot cross-read.
+  await actAs(discUserPending.id);
+  const pendingVisible = await rows(`select id from public.profiles`);
+  const pendingIds = pendingVisible.map((r) => String(r.id));
+  assert.deepEqual(pendingIds, [String(discProfilePending.id)]);
+});
+
+test('40 · discovery: verified users cannot read unverified profiles', async () => {
+  await actAs(userV.id); // VERIFIED viewer
+  // PENDING profile is not visible.
+  assert.equal(
+    (await rows(`select 1 from public.profiles where id = $1`, [discProfilePending.id])).length,
+    0
+  );
+  // REJECTED profile is not visible.
+  assert.equal(
+    (await rows(`select 1 from public.profiles where id = $1`, [discProfileRejected.id])).length,
+    0
+  );
+  // No-submission profile is not visible.
+  assert.equal(
+    (await rows(`select 1 from public.profiles where id = $1`, [discProfileNone.id])).length,
+    0
+  );
+  // userW (no submissions) is not visible.
+  assert.equal(
+    (await rows(`select 1 from public.profiles where id = $1`, [profileW.id])).length,
+    0
+  );
+});
+
+test('41 · discovery: verified users can read discoverable profile photos', async () => {
+  // userV (VERIFIED) reads the photo belonging to discProfileV (VERIFIED).
+  await actAs(userV.id);
+  const photos = await rows(
+    `select storage_path, is_primary from public.profile_photos where profile_id = $1`,
+    [discProfileV.id]
+  );
+  assert.equal(photos.length, 1);
+  assert.equal(photos[0].storage_path, 'disc/v/photo-1.jpg');
+  assert.equal(photos[0].is_primary, true);
+
+  // An unverified user cannot read the same photo.
+  await actAs(discUserNone.id);
+  assert.equal(
+    (await rows(`select 1 from public.profile_photos where profile_id = $1`, [discProfileV.id])).length,
+    0
+  );
+});
+
+test('42 · discovery: existing owner-only access still works for unverified owners', async () => {
+  // userW (no submissions, unverified) still reads their own profile.
+  await actAs(userW.id);
+  assert.equal(
+    (await rows(`select 1 from public.profiles where id = $1`, [profileW.id])).length,
+    1
+  );
+  // But cannot read another verified user's profile.
+  assert.equal(
+    (await rows(`select 1 from public.profiles where id = $1`, [discProfileV.id])).length,
+    0
+  );
+  // Own photos still visible.
+  assert.equal(
+    (await rows(`select 1 from public.profile_photos where profile_id = $1`, [profileW.id])).length,
+    0
+  );
+  // Own interests still visible.
+  assert.equal(
+    (await rows(`select 1 from public.profile_interests where profile_id = $1`, [profileW.id])).length,
+    0
+  );
+});
+
+// ============================================================================
+// Likes/passes/matches slice tests (Phase 6)
+// ============================================================================
+
+// Phase 6 fixtures are created inside the first dating test (service context)
+// and shared through module-scoped variables, mirroring the discovery pattern.
+let likeUserA, likeUserB, likeProfileA, likeProfileB;
+let matchId; // the A<->B match used by the visibility tests
+
+async function insertVerifiedUserFixture(prefix, index) {
+  const user = await one(`insert into auth.users (email) values ($1) returning id`, [
+    `${prefix}-${index}@example.test`,
+  ]);
+  const profile = await one(
+    `insert into public.profiles ${PROFILE_COLUMNS}
+     values ($1, $2, current_date - interval '20 years', $3,
+             'Computer Science', 2, 'woman', 'everyone', 'Dating fixture')
+     returning id`,
+    [user.id, `Dating${index}`, university.id]
+  );
+  const sub = await one(
+    `insert into public.verification_submissions (profile_id, storage_path)
+     values ($1, $2) returning id`,
+    [profile.id, `student-ids/dating/${index}.jpg`]
+  );
+  await one(
+    `update public.verification_submissions
+     set status = 'VERIFIED', reviewer_id = $1 where id = $2 returning id`,
+    [userStaff.id, sub.id]
+  );
+  return { user, profile };
+}
+
+test('43 · dating: verified viewer can record an action for their own profile', async () => {
+  await actAsService();
+  ({ user: likeUserA, profile: likeProfileA } = await insertVerifiedUserFixture('dating-a', 'A'));
+  ({ user: likeUserB, profile: likeProfileB } = await insertVerifiedUserFixture('dating-b', 'B'));
+
+  await actAs(likeUserA.id);
+  const action = await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+     values ($1, $2, 'LIKE') returning id, action_type, created_at`,
+    [likeProfileA.id, likeProfileB.id]
+  );
+  assert.equal(action.action_type, 'LIKE');
+  assert.ok(action.created_at instanceof Date);
+
+  // Own OUTGOING actions are readable back.
+  const mine = await rows(`select id from public.dating_actions`);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].id, action.id);
+});
+
+test('44 · dating: self-actions are rejected by the CHECK constraint', async () => {
+  await actAs(likeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $1, 'LIKE')`,
+        [likeProfileA.id]
+      ),
+    'dating_actions_no_self_action'
+  );
+});
+
+test('45 · dating: exactly one action per actor/target pair (LIKE after PASS included)', async () => {
+  await actAs(likeUserA.id);
+  // Duplicate LIKE…
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'LIKE')`,
+        [likeProfileA.id, likeProfileB.id]
+      ),
+    'dating_actions_actor_target_unique'
+  );
+  // …PASS on the same pair is the same unique slot — also rejected.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'PASS')`,
+        [likeProfileA.id, likeProfileB.id]
+      ),
+    'dating_actions_actor_target_unique'
+  );
+});
+
+test('46 · dating: action_type is restricted to LIKE/PASS', async () => {
+  await actAs(likeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'MAYBE')`,
+        [likeProfileA.id, likeProfileB.id]
+      ),
+    'dating_actions_action_type_check'
+  );
+});
+
+test('47 · dating: a client cannot spoof the actor (actor_profile_id must be their own)', async () => {
+  // likeUserB tries to create an action FROM likeProfileA — the INSERT
+  // policy requires actor_profile_id to resolve to auth.uid().
+  await actAs(likeUserB.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'LIKE')`,
+        [likeProfileA.id, likeProfileB.id]
+      ),
+    'row-level security'
+  );
+  // Nothing was created for likeProfileA.
+  await actAsService();
+  assert.equal(
+    (await rows(`select 1 from public.dating_actions where actor_profile_id = $1`, [likeProfileA.id])).length,
+    1 // only likeUserA's genuine action from test 43
+  );
+});
+
+test('48 · dating: an unverified viewer cannot record actions', async () => {
+  await actAs(userW.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'LIKE')`,
+        [profileW.id, likeProfileA.id]
+      ),
+    'row-level security'
+  );
+});
+
+test('49 · dating: an unverified target cannot be acted on', async () => {
+  await actAs(likeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'LIKE')`,
+        [likeProfileA.id, discProfilePending.id]
+      ),
+    'row-level security'
+  );
+});
+
+test('50 · dating: anonymous clients have no access to dating_actions', async () => {
+  await actAs(null);
+  await expectFailure(() => rows(`select * from public.dating_actions`), 'permission denied');
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+         values ($1, $2, 'LIKE')`,
+        [likeProfileA.id, likeProfileB.id]
+      ),
+    'permission denied'
+  );
+});
+
+test('51 · dating: incoming actions are never visible (no "who liked you")', async () => {
+  // likeUserB records their own action on likeProfileA.
+  await actAs(likeUserB.id);
+  await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+     values ($1, $2, 'LIKE') returning id`,
+    [likeProfileB.id, likeProfileA.id]
+  );
+
+  // likeUserA cannot see the incoming LIKE targeting them…
+  await actAs(likeUserA.id);
+  assert.equal(
+    (await rows(`select 1 from public.dating_actions where actor_profile_id = $1`, [likeProfileB.id])).length,
+    0
+  );
+  // …only their own outgoing action.
+  const mine = await rows(`select actor_profile_id from public.dating_actions`);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].actor_profile_id, likeProfileA.id);
+});
+
+test('52 · dating: actions are immutable for normal users (no UPDATE/DELETE grant)', async () => {
+  await actAs(likeUserA.id);
+  await expectFailure(
+    () => rows(`update public.dating_actions set action_type = 'PASS' where actor_profile_id = $1`, [likeProfileA.id]),
+    'permission denied'
+  );
+  await expectFailure(
+    () => rows(`delete from public.dating_actions where actor_profile_id = $1`, [likeProfileA.id]),
+    'permission denied'
+  );
+});
+
+test('53 · matches: canonical pair ordering, uniqueness, no self-match, server-only writes', async () => {
+  // Normal users hold no INSERT grant — matches are created only by the
+  // backend's service-role atomic operation.
+  await actAs(likeUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.matches (user_a_id, user_b_id) values ($1, $2)`,
+        [likeProfileA.id, likeProfileB.id]
+      ),
+    'permission denied'
+  );
+
+  await actAsService();
+  // Canonical ordering is enforced (user_a_id must be the smaller uuid).
+  const [smaller, larger] = [likeProfileA.id, likeProfileB.id].sort();
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.matches (user_a_id, user_b_id) values ($1, $2)`,
+        [larger, smaller]
+      ),
+    'matches_canonical_pair_order'
+  );
+  // A profile cannot match itself.
+  await expectFailure(
+    () => rows(`insert into public.matches (user_a_id, user_b_id) values ($1, $1)`, [likeProfileA.id]),
+    'matches_canonical_pair_order'
+  );
+  // The canonical insert succeeds…
+  const match = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id, created_at`,
+    [smaller, larger]
+  );
+  matchId = match.id;
+  // …and the pair is unique — a second row for the same pair is impossible.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.matches (user_a_id, user_b_id) values ($1, $2)`,
+        [smaller, larger]
+      ),
+    'matches_pair_unique'
+  );
+  // unmatched_at cannot precede created_at.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.matches (user_a_id, user_b_id, created_at, unmatched_at)
+         values ($1, $2, now(), now() - interval '1 hour')`,
+        [smaller, larger]
+      ),
+    'matches_unmatch_after_creation'
+  );
+
+  // Service-role unmatch (soft) works and respects the consistency check;
+  // the row is retained. Then the match is restored for the visibility tests.
+  await one(`update public.matches set unmatched_at = now() where id = $1 returning 1`, [matchId]);
+  await one(`update public.matches set unmatched_at = null where id = $1 returning 1`, [matchId]);
+});
+
+test('54 · matches: participant-only visibility (nonparticipants and anon see nothing)', async () => {
+  await actAs(likeUserA.id);
+  assert.equal((await rows(`select id from public.matches`)).length, 1);
+  await actAs(likeUserB.id);
+  assert.equal((await rows(`select id from public.matches`)).length, 1);
+
+  // A nonparticipant (verified or not) sees no rows — no existence leak.
+  await actAs(userV.id);
+  assert.equal((await rows(`select id from public.matches`)).length, 0);
+  await actAs(userW.id);
+  assert.equal((await rows(`select id from public.matches`)).length, 0);
+
+  await actAs(null);
+  await expectFailure(() => rows(`select * from public.matches`), 'permission denied');
+});
+
+test('55 · matches: deleting a profile cascades its actions and matches away', async () => {
+  await actAsService();
+  const { user: userCasc, profile: profileCasc } = await insertVerifiedUserFixture('dating-casc', 'C');
+
+  // profileCasc acts on likeProfileA and matches with them (canonical insert).
+  await actAs(userCasc.id);
+  await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
+     values ($1, $2, 'LIKE') returning id`,
+    [profileCasc.id, likeProfileA.id]
+  );
+  await actAsService();
+  const [smaller, larger] = [profileCasc.id, likeProfileA.id].sort();
+  await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smaller, larger]
+  );
+
+  // Deleting the auth identity cascades profile → actions + matches.
+  await rows(`delete from auth.users where id = $1`, [userCasc.id]);
+  assert.equal(
+    (await rows(`select 1 from public.dating_actions where actor_profile_id = $1 or target_profile_id = $1`, [profileCasc.id])).length,
+    0
+  );
+  assert.equal(
+    (await rows(`select 1 from public.matches where user_a_id = $1 or user_b_id = $1`, [profileCasc.id])).length,
+    0
+  );
+
+  // The untouched pair's rows survive.
+  assert.equal(
+    (await rows(`select 1 from public.matches where id = $1`, [matchId])).length,
+    1
+  );
+});
+
+test('56 · dating: secondary indexes exist for both action directions', async () => {
+  await actAsService();
+  const indexes = await rows(`
+    select indexname from pg_indexes
+    where schemaname = 'public' and tablename = 'dating_actions'
+  `);
+  const names = indexes.map((i) => i.indexname);
+  assert.ok(
+    names.includes('dating_actions_target_profile_id_idx'),
+    'expected an index on target_profile_id'
+  );
+  assert.ok(
+    names.includes('dating_actions_actor_target_unique'),
+    'expected the unique (actor, target) index'
+  );
+});
+
+

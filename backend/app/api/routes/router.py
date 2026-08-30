@@ -4,8 +4,10 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     admin,
+    discovery,
     health,
     interests,
+    matches,
     photos,
     profiles,
     universities,
@@ -20,3 +22,5 @@ api_router.include_router(universities.router)
 api_router.include_router(interests.router)
 api_router.include_router(verification.router)
 api_router.include_router(admin.router)
+api_router.include_router(discovery.router)
+api_router.include_router(matches.router)
