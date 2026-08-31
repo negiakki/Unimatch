@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+import { AppHeader } from "@/components/app-header";
+
 import { ProfileEditForm } from "./profile-edit-form";
 
 export const metadata: Metadata = {
@@ -10,8 +12,11 @@ export const metadata: Metadata = {
 
 export default function ProfileEditPage() {
   return (
-    <main className="mx-auto w-full max-w-md px-5 pb-16">
-      <ProfileEditForm />
-    </main>
+    <>
+      <AppHeader />
+      <main className="mx-auto w-full max-w-md px-5 pb-16">
+        <ProfileEditForm />
+      </main>
+    </>
   );
 }

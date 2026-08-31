@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+import { AppHeader } from "@/components/app-header";
+
 import { DiscoveryFeed } from "./discovery-feed";
 
 export const metadata: Metadata = {
@@ -10,8 +12,11 @@ export const metadata: Metadata = {
 
 export default function DiscoveryPage() {
   return (
-    <main className="mx-auto w-full max-w-lg px-5 pb-16">
-      <DiscoveryFeed />
-    </main>
+    <>
+      <AppHeader />
+      <main className="mx-auto w-full max-w-lg px-5 pb-16">
+        <DiscoveryFeed />
+      </main>
+    </>
   );
 }

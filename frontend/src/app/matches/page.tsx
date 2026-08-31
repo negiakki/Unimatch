@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
+import { AppHeader } from "@/components/app-header";
 import {
   DatingApiError,
   fetchMatches,
@@ -78,8 +79,8 @@ function MatchCard({
   }
 
   return (
-    <article className="overflow-hidden rounded-card border border-line bg-surface shadow-card">
-      <div className="relative aspect-[4/5] bg-background">
+    <article className="rounded-card border-line bg-surface shadow-card overflow-hidden border">
+      <div className="bg-background relative aspect-[4/5]">
         {photoUrl ? (
           <Image
             src={photoUrl}
@@ -90,13 +91,13 @@ function MatchCard({
             className="object-cover"
           />
         ) : (
-          <div className="grid size-full place-items-center bg-accent/10">
-            <span aria-hidden className="text-7xl font-bold text-accent">
+          <div className="bg-accent/10 grid size-full place-items-center">
+            <span aria-hidden className="text-accent text-7xl font-bold">
               {firstName.charAt(0).toUpperCase()}
             </span>
           </div>
         )}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-black/70 via-black/30 to-transparent px-5 pb-4 pt-16">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-black/70 via-black/30 to-transparent px-5 pt-16 pb-4">
           <h2 className="text-2xl font-bold tracking-tight text-white">
             {firstName}
             {profile.age !== null && <span>, {profile.age}</span>}
@@ -110,13 +111,13 @@ function MatchCard({
       </div>
       <div className="flex items-center gap-3 p-4">
         {profile.course && (
-          <p className="min-w-0 flex-1 truncate text-sm text-muted">
+          <p className="text-muted min-w-0 flex-1 truncate text-sm">
             {profile.course}
           </p>
         )}
         <Link
           href={`/messages/${entry.id}`}
-          className={`shrink-0 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+          className={`bg-accent shadow-card shrink-0 rounded-xl px-4 py-2 text-sm font-semibold text-white transition-transform active:scale-[0.98] ${FOCUS_RING}`}
         >
           Message
         </Link>
@@ -125,7 +126,7 @@ function MatchCard({
           onClick={() => void handleUnmatch()}
           disabled={busy}
           aria-busy={busy}
-          className={`shrink-0 rounded-xl border border-line bg-surface px-4 py-2 text-sm font-semibold text-muted transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+          className={`border-line bg-surface text-muted shrink-0 rounded-xl border px-4 py-2 text-sm font-semibold transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
         >
           {busy ? "Unmatching…" : "Unmatch"}
         </button>
@@ -151,7 +152,10 @@ export default function MatchesPage() {
         await load();
         setPhase("ready");
       } catch (caught) {
-        if (caught instanceof DatingApiError && caught.code === "unauthorized") {
+        if (
+          caught instanceof DatingApiError &&
+          caught.code === "unauthorized"
+        ) {
           router.replace("/login");
           return;
         }
@@ -167,90 +171,82 @@ export default function MatchesPage() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-lg px-5 pb-16">
-      <section className="pt-10">
-        <div className="flex items-center justify-between gap-2">
-          <h1 className="text-3xl font-bold tracking-tight">Matches</h1>
-          <div className="flex items-center gap-2">
-            <Link
-              href="/messages"
-              className={`rounded-xl border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-            >
-              Messages
-            </Link>
-            <Link
-              href="/discovery"
-              className={`rounded-xl border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-            >
-              Discover
-            </Link>
+    <>
+      <AppHeader />
+      <main className="mx-auto w-full max-w-lg px-5 pb-16">
+        <section className="pt-10">
+          <div className="flex items-center justify-between gap-2">
+            <h1 className="text-3xl font-bold tracking-tight">Matches</h1>
           </div>
-        </div>
 
-        {phase === "loading" && (
-          <div className="mt-8 space-y-5" aria-busy="true" aria-live="polite">
-            <span className="sr-only">Loading your matches</span>
-            <div className="aspect-[4/5] animate-pulse rounded-card bg-line" />
-          </div>
-        )}
+          {phase === "loading" && (
+            <div className="mt-8 space-y-5" aria-busy="true" aria-live="polite">
+              <span className="sr-only">Loading your matches</span>
+              <div className="rounded-card bg-line aspect-[4/5] animate-pulse" />
+            </div>
+          )}
 
-        {phase === "error" && (
-          <div className="mt-8 text-center">
-            <p role="alert" className="text-[15px] leading-relaxed text-muted">
-              {errorMessageFor(error)}
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                setPhase("loading");
-                setError(null);
-                void load()
-                  .then(() => setPhase("ready"))
-                  .catch((caught: unknown) => {
-                    console.error("Failed to load matches:", caught);
-                    setError(
-                      caught instanceof DatingApiError ? caught : null,
-                    );
-                    setPhase("error");
-                  });
-              }}
-              className={`mt-6 w-full rounded-2xl border border-line bg-surface py-3.5 font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-            >
-              Try again
-            </button>
-          </div>
-        )}
+          {phase === "error" && (
+            <div className="mt-8 text-center">
+              <p
+                role="alert"
+                className="text-muted text-[15px] leading-relaxed"
+              >
+                {errorMessageFor(error)}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setPhase("loading");
+                  setError(null);
+                  void load()
+                    .then(() => setPhase("ready"))
+                    .catch((caught: unknown) => {
+                      console.error("Failed to load matches:", caught);
+                      setError(
+                        caught instanceof DatingApiError ? caught : null,
+                      );
+                      setPhase("error");
+                    });
+                }}
+                className={`border-line bg-surface text-ink shadow-card mt-6 w-full rounded-2xl border py-3.5 font-semibold transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+              >
+                Try again
+              </button>
+            </div>
+          )}
 
-        {phase === "ready" && matches.length === 0 && (
-          <div className="mt-16 text-center">
-            <h2 className="text-2xl font-bold tracking-tight">
-              No matches yet
-            </h2>
-            <p className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted">
-              When you and another student like each other, they&apos;ll show
-              up here.
-            </p>
-            <Link
-              href="/discovery"
-              className={`mt-8 inline-block w-full rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-            >
-              Start discovering
-            </Link>
-          </div>
-        )}
+          {phase === "ready" && matches.length === 0 && (
+            <div className="mt-16 text-center">
+              <h2 className="text-2xl font-bold tracking-tight">
+                No matches yet
+              </h2>
+              <p className="text-muted mx-auto mt-3 max-w-sm text-[15px] leading-relaxed">
+                When you and another student like each other, they&apos;ll show
+                up here.
+              </p>
+              <Link
+                href="/discovery"
+                className={`bg-accent shadow-card mt-8 inline-block w-full rounded-2xl py-3.5 font-semibold text-white transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+              >
+                Start discovering
+              </Link>
+            </div>
+          )}
 
-        {phase === "ready" && matches.length > 0 && (
-          <div className="mt-8 space-y-8">
-            {matches.map((entry) => (
-              <MatchCard
-                key={entry.id}
-                entry={entry}
-                onUnmatched={removeMatch}
-              />
-            ))}
-          </div>
-        )}
-      </section>
-    </main>
+          {phase === "ready" && matches.length > 0 && (
+            <div className="mt-8 space-y-8">
+              {matches.map((entry) => (
+                <MatchCard
+                  key={entry.id}
+                  entry={entry}
+                  onUnmatched={removeMatch}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      </main>
+    </>
   );
 }

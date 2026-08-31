@@ -1,0 +1,3 @@
+# Minimal Supabase CLI project config (project_id required by the CLI).
+# The hosted project is linked via .temp/linked-project.json (ref: ojhetsacblofpzfcegmc).
+project_id = "UniMatch"
