@@ -83,6 +83,7 @@ PROFILE_RESPONSE_KEYS = {
     "relationship_intent",
     "height_cm",
     "hometown",
+    "motivations",
     "interests",
     "profile_prompts",
     "social_links",
@@ -202,6 +203,7 @@ class FakeSupabase:
             "universities": [],
             "interests": [],
             "profile_interests": [],
+            "custom_interests": [],
         }
         self._fail_insert_with = fail_insert_with
         self._users_by_token = users_by_token
@@ -842,3 +844,340 @@ def test_universities_cannot_be_created(client, fake):
 
     assert resp.status_code in (401, 405)
     assert fake.tables["universities"] == [dict(row) for row in UNIVERSITY_ROWS]
+
+
+# ---------------------------------------------------------------------------
+# 9. Phase 9.3 — academic year 1–6, motivations, custom interests.
+# ---------------------------------------------------------------------------
+
+
+def stored_custom_interest(profile_id, interest_id, name):
+    return {
+        "id": str(interest_id),
+        "profile_id": str(profile_id),
+        "name": name,
+        "created_at": "2026-08-28T09:00:00+00:00",
+        "updated_at": "2026-08-28T09:00:00+00:00",
+    }
+
+
+@pytest.mark.parametrize("value", [7, 8])
+def test_academic_year_seven_and_eight_are_422(client, fake, value):
+    resp = client.post(
+        f"{API}/me", json={**VALID_PROFILE, "academic_year": value}, headers=AUTH_HEADERS
+    )
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+
+
+def test_academic_year_six_is_accepted(client, fake):
+    resp = client.post(
+        f"{API}/me", json={**VALID_PROFILE, "academic_year": 6}, headers=AUTH_HEADERS
+    )
+
+    assert resp.status_code == 201
+    assert fake.tables["profiles"][0]["academic_year"] == 6
+
+
+def test_motivations_are_persisted_on_create_and_update(client, fake):
+    payload = {
+        **VALID_PROFILE,
+        "motivations": ["dating", "making_friends"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    assert resp.json()["motivations"] == ["dating", "making_friends"]
+    assert fake.tables["profiles"][0]["motivations"] == ["dating", "making_friends"]
+
+    fake.tables["profiles"] = [stored_profile()]
+    update_resp = client.put(
+        f"{API}/me",
+        json={**VALID_PROFILE, "motivations": ["confidence_and_communication"]},
+        headers=AUTH_HEADERS,
+    )
+
+    assert update_resp.status_code == 200
+    assert update_resp.json()["motivations"] == ["confidence_and_communication"]
+
+
+def test_omitted_motivations_default_to_empty_list(client, fake):
+    resp = client.post(f"{API}/me", json=VALID_PROFILE, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    assert resp.json()["motivations"] == []
+
+
+def test_explicitly_empty_motivations_are_422(client, fake):
+    # Omission is backward-compatible, but an explicit empty selection is not
+    # a valid value — when supplied, 1-3 motivations are required.
+    resp = client.post(
+        f"{API}/me", json={**VALID_PROFILE, "motivations": []}, headers=AUTH_HEADERS
+    )
+
+    assert_validation_error(resp)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["friendship", "DATING", "dating ", None, 3, ["dating", "dating"]],
+)
+def test_invalid_motivations_are_422(client, fake, value):
+    resp = client.post(
+        f"{API}/me", json={**VALID_PROFILE, "motivations": value}, headers=AUTH_HEADERS
+    )
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+
+
+def test_too_many_motivations_are_422(client, fake):
+    resp = client.post(
+        f"{API}/me",
+        json={
+            **VALID_PROFILE,
+            "motivations": [
+                "dating",
+                "making_friends",
+                "confidence_and_communication",
+                "dating",
+            ],
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    # The duplicate is caught first; either way this is a structured 422.
+    assert_validation_error(resp)
+
+
+def test_custom_interests_are_created_and_returned_with_custom_source(client, fake):
+    payload = {
+        **VALID_PROFILE,
+        "interest_ids": [str(STATE_UNIVERSITY_ID)][:0]
+        + [],  # no catalog interests
+        "custom_interest_names": ["Indie Game Design", "Street Photography"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    body = resp.json()
+    custom = [entry for entry in body["interests"] if entry["source"] == "custom"]
+    assert [entry["name"] for entry in custom] == [
+        "Indie Game Design",
+        "Street Photography",
+    ]
+    rows = fake.tables["custom_interests"]
+    assert len(rows) == 2
+    assert all(
+        row["profile_id"] == fake.tables["profiles"][0]["id"] for row in rows
+    )
+
+
+def test_custom_interest_names_are_trimmed(client, fake):
+    payload = {**VALID_PROFILE, "custom_interest_names": ["  Kite Building  "]}
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    assert fake.tables["custom_interests"][0]["name"] == "Kite Building"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", "x" * 41],
+)
+def test_invalid_custom_interest_names_are_422(client, fake, value):
+    payload = {**VALID_PROFILE, "custom_interest_names": [value]}
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["custom_interests"] == []
+
+
+def test_duplicate_custom_interest_names_case_insensitive_are_422(client, fake):
+    payload = {
+        **VALID_PROFILE,
+        "custom_interest_names": ["Pottery", "POTTERY"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+
+
+def test_custom_interest_matching_catalog_name_is_422(client, fake):
+    fake.tables["interests"] = [
+        {"id": str(uuid4()), "name": "Gaming"},
+    ]
+    payload = {**VALID_PROFILE, "custom_interest_names": ["gaming"]}
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["custom_interests"] == []
+
+
+def test_combined_interest_limit_of_eight_is_enforced(client, fake):
+    catalog_ids = [str(uuid4()) for _ in range(5)]
+    fake.tables["interests"] = [
+        {"id": interest_id, "name": f"Interest {index}"}
+        for index, interest_id in enumerate(catalog_ids)
+    ]
+    payload = {
+        **VALID_PROFILE,
+        "interest_ids": catalog_ids,
+        "custom_interest_names": ["One", "Two", "Three", "Four"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+    assert fake.tables["custom_interests"] == []
+
+
+def test_combined_interest_limit_boundary_is_accepted(client, fake):
+    catalog_ids = [str(uuid4()) for _ in range(4)]
+    fake.tables["interests"] = [
+        {"id": interest_id, "name": f"Interest {index}"}
+        for index, interest_id in enumerate(catalog_ids)
+    ]
+    payload = {
+        **VALID_PROFILE,
+        "interest_ids": catalog_ids,
+        "custom_interest_names": ["One", "Two", "Three", "Four"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    assert len(resp.json()["interests"]) == 8
+
+
+def test_put_replaces_custom_interests_deleting_removed_and_creating_new(client, fake):
+    fake.tables["profiles"] = [stored_profile()]
+    fake.tables["custom_interests"] = [
+        stored_custom_interest(
+            STUDENT_PROFILE_ID, UUID("eeee0000-0000-0000-0000-000000000001"), "Old One"
+        ),
+        stored_custom_interest(
+            STUDENT_PROFILE_ID, UUID("eeee0000-0000-0000-0000-000000000002"), "Kept"
+        ),
+    ]
+    payload = {**VALID_PROFILE, "custom_interest_names": ["Kept", "Brand New"]}
+
+    resp = client.put(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    names = sorted(
+        row["name"] for row in fake.tables["custom_interests"]
+    )
+    assert names == ["Brand New", "Kept"]
+    # Replace-set semantics: removed names are gone, the set matches exactly.
+    assert "Old One" not in names
+
+
+def test_put_with_empty_custom_interests_clears_them(client, fake):
+    fake.tables["profiles"] = [stored_profile()]
+    fake.tables["custom_interests"] = [
+        stored_custom_interest(
+            STUDENT_PROFILE_ID, UUID("eeee0000-0000-0000-0000-000000000003"), "Solo"
+        ),
+    ]
+    payload = {**VALID_PROFILE, "custom_interest_names": []}
+
+    resp = client.put(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert fake.tables["custom_interests"] == []
+    assert [e["name"] for e in resp.json()["interests"]] == []
+
+
+def test_custom_interests_are_scoped_to_the_callers_own_profile(client, fake):
+    fake.tables["profiles"] = [
+        stored_profile(),
+        stored_profile(
+            profile_id=OTHER_PROFILE_ID, auth_user_id=OTHER_AUTH_ID, first_name="Riley"
+        ),
+    ]
+    fake.tables["custom_interests"] = [
+        stored_custom_interest(
+            STUDENT_PROFILE_ID, UUID("eeee0000-0000-0000-0000-000000000004"), "Mine"
+        ),
+        stored_custom_interest(
+            OTHER_PROFILE_ID, UUID("eeee0000-0000-0000-0000-000000000005"), "Theirs"
+        ),
+    ]
+    payload = {**VALID_PROFILE, "custom_interest_names": ["Mine", "Replacement"]}
+
+    resp = client.put(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    # The caller's set was replaced; the other profile's rows are untouched.
+    other_names = [
+        row["name"]
+        for row in fake.tables["custom_interests"]
+        if row["profile_id"] == str(OTHER_PROFILE_ID)
+    ]
+    assert other_names == ["Theirs"]
+    own_names = sorted(
+        row["name"]
+        for row in fake.tables["custom_interests"]
+        if row["profile_id"] == str(STUDENT_PROFILE_ID)
+    )
+    assert own_names == ["Mine", "Replacement"]
+
+
+def test_client_supplied_profile_id_cannot_hijack_custom_interests(client, fake):
+    fake.tables["profiles"] = [
+        stored_profile(),
+        stored_profile(
+            profile_id=OTHER_PROFILE_ID, auth_user_id=OTHER_AUTH_ID, first_name="Riley"
+        ),
+    ]
+    payload = {
+        **VALID_PROFILE,
+        "profile_id": str(OTHER_PROFILE_ID),
+        "custom_interest_names": ["Injected"],
+    }
+
+    resp = client.put(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert [
+        row["profile_id"] for row in fake.tables["custom_interests"]
+    ] == [str(STUDENT_PROFILE_ID)]
+
+
+def test_get_returns_merged_interests_with_source_discriminator(client, fake):
+    catalog_id = uuid4()
+    fake.tables["profiles"] = [stored_profile()]
+    fake.tables["interests"] = [{"id": str(catalog_id), "name": "Alpha Catalog"}]
+    fake.tables["profile_interests"] = [
+        {
+            "profile_id": str(STUDENT_PROFILE_ID),
+            "interest_id": str(catalog_id),
+            "created_at": "2026-08-28T09:00:00+00:00",
+        }
+    ]
+    fake.tables["custom_interests"] = [
+        stored_custom_interest(
+            STUDENT_PROFILE_ID, UUID("eeee0000-0000-0000-0000-000000000006"), "Beta Custom"
+        ),
+    ]
+
+    resp = client.get(f"{API}/me", headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json()["interests"] == [
+        {"id": str(catalog_id), "name": "Alpha Catalog", "source": "catalog"},
+        {
+            "id": "eeee0000-0000-0000-0000-000000000006",
+            "name": "Beta Custom",
+            "source": "custom",
+        },
+    ]

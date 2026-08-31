@@ -98,6 +98,7 @@ PROFILE_RESPONSE_KEYS = {
     "relationship_intent",
     "height_cm",
     "hometown",
+    "motivations",
     "interests",
     "profile_prompts",
     "social_links",
@@ -217,6 +218,7 @@ class FakeSupabase:
             "universities": [],
             "interests": [],
             "profile_interests": [],
+            "custom_interests": [],
         }
         self._fail_insert_with = fail_insert_with
         self._users_by_token = users_by_token
@@ -394,8 +396,8 @@ def test_post_with_valid_interests_creates_profile_and_links(client, fake):
     assert resp.status_code == 201
     body = resp.json()
     assert body["interests"] == [
-        {"id": str(INTEREST_IDS["Gaming"]), "name": "Gaming"},
-        {"id": str(INTEREST_IDS["Hiking"]), "name": "Hiking"},
+        {"id": str(INTEREST_IDS["Gaming"]), "name": "Gaming", "source": "catalog"},
+        {"id": str(INTEREST_IDS["Hiking"]), "name": "Hiking", "source": "catalog"},
     ]
     profile = fake.tables["profiles"][0]
     assert profile["auth_user_id"] == str(STUDENT_AUTH_ID)
@@ -446,7 +448,8 @@ def test_get_returns_selected_interests_ordered_by_name(client, fake):
         "Travel",
     ]
     for entry in body["interests"]:
-        assert set(entry.keys()) == {"id", "name"}
+        assert set(entry.keys()) == {"id", "name", "source"}
+        assert entry["source"] == "catalog"
 
 
 def test_get_without_selection_returns_empty_interests(client, fake):
@@ -692,3 +695,135 @@ def test_client_supplied_profile_and_auth_ids_cannot_hijack_interests(client, fa
             (str(OTHER_PROFILE_ID), str(INTEREST_IDS["Gaming"])),
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. Phase 9.3 — custom interests alongside the catalog.
+# ---------------------------------------------------------------------------
+
+
+def stored_custom(profile_id, interest_id, name):
+    return {
+        "id": str(interest_id),
+        "profile_id": str(profile_id),
+        "name": name,
+        "created_at": "2026-08-28T09:00:00+00:00",
+        "updated_at": "2026-08-28T09:00:00+00:00",
+    }
+
+
+def test_custom_interests_merge_into_profile_interests_with_source(client, fake):
+    fake.tables["profiles"] = [stored_profile()]
+    fake.tables["profile_interests"] = [stored_link(STUDENT_PROFILE_ID, "Hiking")]
+    fake.tables["custom_interests"] = [
+        stored_custom(
+            STUDENT_PROFILE_ID, uuid4(), "Zombie Films"
+        ),
+        stored_custom(
+            STUDENT_PROFILE_ID, uuid4(), "Archery"
+        ),
+    ]
+
+    resp = client.get(f"{API}/me", headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    body = resp.json()["interests"]
+    # Merged and ordered by name across BOTH sources.
+    assert [(entry["name"], entry["source"]) for entry in body] == [
+        ("Archery", "custom"),
+        ("Hiking", "catalog"),
+        ("Zombie Films", "custom"),
+    ]
+
+
+def test_custom_interest_colliding_with_catalog_is_422_and_nothing_is_written(
+    client, fake
+):
+    payload = {
+        **VALID_PROFILE,
+        "custom_interest_names": ["hiking"],  # catalog has "Hiking"
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+    assert fake.tables["custom_interests"] == []
+
+
+def test_custom_interest_case_insensitive_duplicates_in_one_request_are_422(
+    client, fake
+):
+    payload = {
+        **VALID_PROFILE,
+        "custom_interest_names": ["Fencing", "FENCING"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+
+
+def test_put_replaces_custom_interests_as_a_set(client, fake):
+    fake.tables["profiles"] = [stored_profile()]
+    fake.tables["custom_interests"] = [
+        stored_custom(STUDENT_PROFILE_ID, uuid4(), "Chess"),
+        stored_custom(STUDENT_PROFILE_ID, uuid4(), "Skating"),
+    ]
+    payload = {**VALID_PROFILE, "custom_interest_names": ["Chess", "Beekeeping"]}
+
+    resp = client.put(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert sorted(
+        row["name"] for row in fake.tables["custom_interests"]
+    ) == ["Beekeeping", "Chess"]
+
+
+def test_custom_interests_are_scoped_to_the_callers_own_profile(client, fake):
+    fake.tables["profiles"] = [
+        stored_profile(),
+        stored_profile(
+            profile_id=OTHER_PROFILE_ID, auth_user_id=OTHER_AUTH_ID, first_name="Riley"
+        ),
+    ]
+    fake.tables["custom_interests"] = [
+        stored_custom(STUDENT_PROFILE_ID, uuid4(), "Mine"),
+        stored_custom(OTHER_PROFILE_ID, uuid4(), "Theirs"),
+    ]
+    payload = {**VALID_PROFILE, "custom_interest_names": []}
+
+    resp = client.put(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    # The caller's custom interests were cleared; the other profile's are intact.
+    remaining = [(row["profile_id"], row["name"]) for row in fake.tables["custom_interests"]]
+    assert remaining == [(str(OTHER_PROFILE_ID), "Theirs")]
+
+
+def test_combined_catalog_and_custom_budget_is_enforced(client, fake):
+    too_many_ids = [str(interest_id) for interest_id in list(INTEREST_IDS.values())[:7]]
+    payload = {
+        **VALID_PROFILE,
+        "interest_ids": too_many_ids,
+        "custom_interest_names": ["One", "Two"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+
+
+def test_combined_catalog_and_custom_budget_boundary_is_accepted(client, fake):
+    seven_ids = [str(interest_id) for interest_id in list(INTEREST_IDS.values())[:7]]
+    payload = {
+        **VALID_PROFILE,
+        "interest_ids": seven_ids,
+        "custom_interest_names": ["One"],
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    assert len(resp.json()["interests"]) == 8

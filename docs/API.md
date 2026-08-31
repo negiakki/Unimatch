@@ -56,7 +56,7 @@ Signup collects date of birth; the backend rejects users under 18
 | --- | --- | --- |
 | Get/update my profile | `GET/POST/PUT /profiles/me` | **Implemented** — POST creates (one per account); contract below |
 | Interests catalog | `GET /interests` | **Implemented** — read-only catalog; contract below |
-| Interest selection | managed within profile ops | **Implemented** — `interest_ids` on profile writes; rules below |
+| Interest selection | managed within profile ops | **Implemented** — `interest_ids` + `custom_interest_names` on profile writes; rules below |
 | Photos | `GET/POST /profiles/me/photos`, `DELETE /profiles/me/photos/{id}`, `PUT /profiles/me/photos/order` | **Implemented** — private bucket, backend-proxied upload, short-lived signed URLs; contract below |
 | View others' profile | `GET /profiles/{user_id}` | Authorized only when viewer may legitimately see that profile |
 
@@ -79,16 +79,18 @@ Only client-safe fields (`id`, `name`) are returned. Errors: `unauthorized`
 #### Interest selection on `POST` / `PUT /api/v1/profiles/me`
 
 The request body accepts an optional `interest_ids` array of interest
-catalog UUIDs; the profile response always includes the resulting selection
-as `interests` — client-safe catalog entries resolved server-side, ordered
-by name:
+catalog UUIDs and an optional `custom_interest_names` array of user-created
+interest names; the profile response always includes the resulting selection
+as `interests` — client-safe entries resolved server-side, ordered by name,
+each with a `source` discriminator (`"catalog"` or `"custom"`):
 
 ```json
 {
   "…profile fields…": "…",
+  "motivations": ["dating", "making_friends"],
   "interests": [
-    { "id": "0b8f7c2e-…", "name": "Gaming" },
-    { "id": "13a9d4f0-…", "name": "Hiking" }
+    { "id": "13a9d4f0-…", "name": "Hiking", "source": "catalog" },
+    { "id": "9c2a6b7d-…", "name": "Indie Game Design", "source": "custom" }
   ],
   "profile_prompts": [],
   "social_links": {},
@@ -102,18 +104,31 @@ Validation rules (violations are the standard 422 `validation_error`):
 - Every supplied id must exist in the interests catalog (checked
   server-side before any write; the database FK remains the backstop).
 - No duplicate ids in one request.
-- At most **8** interests (`interest_ids` max length 8); an empty or omitted
-  array is valid and means no interests.
+- At most **8** interests **in total** (`interest_ids` +
+  `custom_interest_names` combined); an empty or omitted array is valid and
+  means no interests.
+- Custom interest names: trimmed, 1–40 characters, no case-insensitive
+  duplicates within one request, and **no case-insensitive match against a
+  catalog entry** ("already in the catalog — select it instead"). Custom
+  interests are stored per user in `custom_interests` and never modify the
+  shared catalog.
+- `motivations` is an optional array of controlled values
+  (`dating`, `making_friends`, `confidence_and_communication`), 1–3 items,
+  no duplicates; it defaults to `[]` when omitted.
 - Selections always apply to the profile resolved from the bearer token —
   client-supplied `auth_user_id`/`profile_id` values carry no weight.
-- `PUT` uses **replace-set semantics**: the caller's existing selections are
-  deleted and exactly the submitted set is written (an empty array clears
-  all interests). Unrelated profile fields are untouched by that step.
+- `PUT` uses **replace-set semantics**: the caller's existing selections and
+  custom interests are deleted and exactly the submitted sets are written
+  (an empty array clears that source; removed custom-interest rows are
+  deleted, new names are created). Unrelated profile fields are untouched by
+  that step.
 
 Errors: `unauthorized` (401), `profile_not_found` (404, PUT without a
 profile), `profile_already_exists` (409, POST when one exists),
 `validation_error` (422 — unknown interest id, duplicate ids, more than 8
-ids, or any other profile field violation), `database_unavailable` /
+combined interests, invalid custom interest name, catalog collision,
+invalid motivation value, or any other profile field violation),
+`database_unavailable` /
 `database_insert_failed` / `database_update_failed` (503).
 
 #### Profile photos — `POST /api/v1/profiles/me/photos`
@@ -453,8 +468,10 @@ ordering. Response `200`:
       "relationship_intent": "serious",
       "height_cm": 180,
       "hometown": "Springfield",
+      "motivations": ["dating", "making_friends"],
       "interests": [
-        { "id": "0b8f7c2e-…", "name": "Hiking" }
+        { "id": "0b8f7c2e-…", "name": "Hiking", "source": "catalog" },
+        { "id": "9c2a6b7d-…", "name": "Indie Game Design", "source": "custom" }
       ],
       "profile_prompts": [ { "prompt": "…", "answer": "…" } ],
       "photos": [

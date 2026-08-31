@@ -17,8 +17,6 @@
  */
 
 import { apiBaseUrl } from "@/lib/env";
-import type { Interest } from "@/lib/api/interests";
-import { MAX_INTERESTS } from "@/lib/api/interests";
 import { createClient } from "@/lib/supabase/client";
 
 export type ProfileGender = "woman" | "man" | "non_binary" | "other";
@@ -29,12 +27,40 @@ export type ProfileRelationshipIntent =
   | "friendship"
   | "not_sure";
 
+/** "Why I'm here" — controlled values mirroring the backend/DB enum set. */
+export type ProfileMotivation =
+  | "dating"
+  | "making_friends"
+  | "confidence_and_communication";
+
+export const MOTIVATION_OPTIONS: { value: ProfileMotivation; label: string }[] = [
+  { value: "dating", label: "Dating" },
+  { value: "making_friends", label: "Making friends" },
+  {
+    value: "confidence_and_communication",
+    label: "Confidence & communication",
+  },
+];
+
+/** Max interests per profile — combined catalog + custom budget (PRD). */
+export const MAX_COMBINED_INTERESTS = 8;
+
+/** Custom interest name limit — mirrors the database constraint. */
+export const MAX_CUSTOM_INTEREST_LENGTH = 40;
+
 export interface University {
   id: string;
   name: string;
   city: string;
   state: string | null;
   country: string;
+}
+
+/** An interest entry as returned by the backend — catalog or user-created. */
+export interface ProfileInterest {
+  id: string;
+  name: string;
+  source: "catalog" | "custom";
 }
 
 export interface Profile {
@@ -50,8 +76,9 @@ export interface Profile {
   relationship_intent: ProfileRelationshipIntent | null;
   height_cm: number | null;
   hometown: string | null;
-  /** Selected interests as client-safe catalog entries (name order). */
-  interests: Interest[];
+  motivations: ProfileMotivation[];
+  /** Merged catalog + custom interests (name order) with a source tag. */
+  interests: ProfileInterest[];
   profile_prompts: unknown[];
   social_links: Record<string, unknown>;
   created_at: string;
@@ -71,8 +98,11 @@ export interface ProfileInput {
   relationship_intent: ProfileRelationshipIntent | null;
   height_cm: number | null;
   hometown: string | null;
-  /** Replacement set of interest catalog ids (max 8). */
+  motivations: ProfileMotivation[];
+  /** Replacement set of interest catalog ids. */
   interest_ids: string[];
+  /** Replacement set of user-created interest names (trimmed). */
+  custom_interest_names: string[];
 }
 
 /** Raw form values as typed into the controls (heights etc. stay strings). */
@@ -88,8 +118,11 @@ export interface ProfileFormValues {
   relationship_intent: string;
   height_cm: string;
   hometown: string;
+  motivations: string[];
   /** Currently selected interest catalog ids. */
   interest_ids: string[];
+  /** Currently selected custom interest names. */
+  custom_interest_names: string[];
 }
 
 export type ProfileFieldKey =
@@ -103,7 +136,9 @@ export type ProfileFieldKey =
   | "bio"
   | "height_cm"
   | "hometown"
-  | "interest_ids";
+  | "motivations"
+  | "interest_ids"
+  | "custom_interest_names";
 
 export type ProfileFieldErrors = Partial<Record<ProfileFieldKey, string>>;
 
@@ -195,6 +230,11 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFieldErro
 
   if (!values.academic_year) {
     errors.academic_year = "Select your academic year.";
+  } else {
+    const year = Number(values.academic_year);
+    if (!Number.isInteger(year) || year < 1 || year > 6) {
+      errors.academic_year = "Select an academic year between 1 and 6.";
+    }
   }
 
   if (!values.gender) {
@@ -224,8 +264,21 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFieldErro
     errors.hometown = "Your hometown must be 100 characters or fewer.";
   }
 
-  if (values.interest_ids.length > MAX_INTERESTS) {
-    errors.interest_ids = `You can pick at most ${MAX_INTERESTS} interests.`;
+  if (values.motivations.length === 0) {
+    errors.motivations = "Pick at least one reason you're here.";
+  }
+
+  const invalidCustom = values.custom_interest_names.find(
+    (name) =>
+      name.trim().length === 0 ||
+      name.trim().length > MAX_CUSTOM_INTEREST_LENGTH,
+  );
+  if (invalidCustom !== undefined) {
+    errors.custom_interest_names = `Custom interests must be 1-${MAX_CUSTOM_INTEREST_LENGTH} characters.`;
+  }
+
+  if (values.interest_ids.length + values.custom_interest_names.length > MAX_COMBINED_INTERESTS) {
+    errors.interest_ids = `You can pick at most ${MAX_COMBINED_INTERESTS} interests in total.`;
   }
 
   return errors;
@@ -248,7 +301,11 @@ export function profileInputFromForm(values: ProfileFormValues): ProfileInput {
         : (values.relationship_intent as ProfileRelationshipIntent),
     height_cm: heightRaw === "" ? null : Number(heightRaw),
     hometown: values.hometown.trim() === "" ? null : values.hometown.trim(),
+    motivations: values.motivations as ProfileMotivation[],
     interest_ids: values.interest_ids,
+    custom_interest_names: values.custom_interest_names.map((name) =>
+      name.trim(),
+    ),
   };
 }
 
@@ -265,7 +322,13 @@ export function profileFormValuesFromProfile(profile: Profile): ProfileFormValue
     relationship_intent: profile.relationship_intent ?? "",
     height_cm: profile.height_cm === null ? "" : String(profile.height_cm),
     hometown: profile.hometown ?? "",
-    interest_ids: profile.interests.map((interest) => interest.id),
+    motivations: profile.motivations,
+    interest_ids: profile.interests
+      .filter((interest) => interest.source === "catalog")
+      .map((interest) => interest.id),
+    custom_interest_names: profile.interests
+      .filter((interest) => interest.source === "custom")
+      .map((interest) => interest.name),
   };
 }
 

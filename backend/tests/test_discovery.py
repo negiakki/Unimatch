@@ -161,6 +161,7 @@ class FakeSupabase:
             "universities": [],
             "verification_submissions": [],
             "profile_interests": [],
+            "custom_interests": [],
             "interests": [],
             "profile_photos": [],
             "dating_actions": [],
@@ -554,6 +555,69 @@ def test_seeking_everyone_means_no_restriction_on_that_side(client, fake):
     assert str(woman["id"]) in ids
 
 
+def test_candidate_interests_merge_catalog_and_custom_with_source(client, fake):
+    cand = _verified_man(UUID("aaaa0000-0000-0000-0000-000000000001"))
+    fake = make_fake(
+        candidates=[cand],
+        submissions=[
+            submission_row(VIEWER_PROFILE_ID, "VERIFIED"),
+            submission_row(cand["id"], "VERIFIED"),
+        ],
+    )
+    catalog_id = str(uuid4())
+    custom_id = str(uuid4())
+    fake.tables["interests"] = [interest_row(UUID(catalog_id), "Hiking")]
+    fake.tables["profile_interests"] = [link_row(cand["id"], catalog_id)]
+    fake.tables["custom_interests"] = [
+        {
+            "id": custom_id,
+            "profile_id": str(cand["id"]),
+            "name": "Zombie Films",
+        }
+    ]
+    next(
+        row
+        for row in fake.tables["profiles"]
+        if row["id"] == str(cand["id"])
+    )["motivations"] = ["dating", "making_friends"]
+    client = make_client(fake)
+    resp = client.get(API, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    candidate = resp.json()["candidates"][0]
+    assert candidate["motivations"] == ["dating", "making_friends"]
+    # Merged, name-ordered across both sources.
+    assert candidate["interests"] == [
+        {"id": catalog_id, "name": "Hiking", "source": "catalog"},
+        {"id": custom_id, "name": "Zombie Films", "source": "custom"},
+    ]
+
+
+def test_custom_interests_of_other_candidates_never_leak_across_profiles(client, fake):
+    cand_a = _verified_man(UUID("aaaa0000-0000-0000-0000-000000000001"))
+    cand_b = _verified_man(UUID("aaaa0000-0000-0000-0000-000000000002"))
+    fake = make_fake(
+        candidates=[cand_a, cand_b],
+        submissions=[
+            submission_row(VIEWER_PROFILE_ID, "VERIFIED"),
+            submission_row(cand_a["id"], "VERIFIED"),
+            submission_row(cand_b["id"], "VERIFIED"),
+        ],
+    )
+    fake.tables["custom_interests"] = [
+        {"id": str(uuid4()), "profile_id": str(cand_a["id"]), "name": "A Only"},
+    ]
+    client = make_client(fake)
+    resp = client.get(API, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.json()["candidates"]}
+    assert by_id[str(cand_a["id"])]["interests"] == [
+        {"id": by_id[str(cand_a["id"])]["interests"][0]["id"], "name": "A Only", "source": "custom"}
+    ]
+    assert by_id[str(cand_b["id"])]["interests"] == []
+
+
 # ---------------------------------------------------------------------------
 # 4. Deterministic ordering (newest first).
 # ---------------------------------------------------------------------------
@@ -595,6 +659,7 @@ RESPONSE_KEYS = {
     "relationship_intent",
     "height_cm",
     "hometown",
+    "motivations",
     "interests",
     "profile_prompts",
     "photos",
@@ -633,7 +698,14 @@ def test_response_shape_and_no_private_fields(client, fake):
     assert set(candidate.keys()) == RESPONSE_KEYS
     assert set(candidate["university"].keys()) == UNIVERSITY_KEYS
     assert candidate["age"] == 25  # 2001-05-10
-    assert candidate["interests"] == [{"id": str(fake.tables["interests"][0]["id"]), "name": "Hiking"}]
+    assert candidate["motivations"] == []
+    assert candidate["interests"] == [
+        {
+            "id": str(fake.tables["interests"][0]["id"]),
+            "name": "Hiking",
+            "source": "catalog",
+        }
+    ]
     assert candidate["profile_prompts"] == [{"prompt": "My top secret", "answer": "Cooking"}]
     assert candidate["photos"] == [
         {"id": str(fake.tables["profile_photos"][0]["id"]), "url": "https://storage.test/sign/cand/photo.png?token=x", "is_primary": True}

@@ -261,6 +261,7 @@ class FakeSupabase:
             "universities": [],
             "verification_submissions": [],
             "profile_interests": [],
+            "custom_interests": [],
             "interests": [],
             "profile_photos": [],
             "dating_actions": [],

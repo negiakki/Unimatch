@@ -9,19 +9,25 @@
 > migration `20260827150000_profile_photos_storage.sql`), **VERIFIED-gate
 > discovery slice implemented** (migration `20260829120000_discovery.sql`),
 > and **likes/passes/matches slice implemented** (`dating_actions`,
-> `matches` — migration `20260830120000_likes_matches.sql`). Conversations,
-> messaging, safety, and notification tables are **not yet implemented**;
-> the requirements for those remain design targets in this document.
+> `matches` — migration `20260830120000_likes_matches.sql`). Profile
+> preferences (academic year 1–6, `motivations`, `custom_interests`) are
+> implemented by migration `20260831140000_profile_preferences.sql`;
+> conversations, messaging, safety, and notification tables are covered by
+> their own slices; notification tables remain design targets in this
+> document.
 
 ## How the schema is managed
 
 - PostgreSQL via Supabase; migrations live in `supabase/migrations/` and are
-  applied with the Supabase CLI. Exactly seven migrations exist so far
+  applied with the Supabase CLI. Exactly ten migrations exist so far
   (`20260827120000_core_schema.sql`, `20260827130000_verification.sql`,
   `20260827140000_verification_storage.sql`,
   `20260827150000_profile_photos_storage.sql`,
   `20260829120000_discovery.sql`, `20260830120000_likes_matches.sql`,
-  `20260830130000_dating_service_role_grants.sql`);
+  `20260830130000_dating_service_role_grants.sql`,
+  `20260830140000_messaging.sql`,
+  `20260831120000_safety_blocks_reports.sql`,
+  `20260831140000_profile_preferences.sql`);
   later slices do **not** modify earlier migrations.
 - Development seed data (fictional universities + interests only) lives in
   `supabase/seed.sql`; the Supabase CLI applies it after migrations on
@@ -56,13 +62,14 @@
 | `date_of_birth` | date NOT NULL | source of age; 18+ enforced by CHECK (see below) |
 | `university_id` | uuid NOT NULL | FK → `universities(id)` |
 | `course` | text NOT NULL | 1–120 chars |
-| `academic_year` | smallint NOT NULL | 1–8 (numeric to stay country-neutral) |
+| `academic_year` | smallint NOT NULL | 1–6 (numeric to stay country-neutral; Phase 9.3) |
 | `gender` | text NOT NULL | `woman` / `man` / `non_binary` / `other` |
 | `seeking_gender` | text NOT NULL | `women` / `men` / `everyone` |
 | `bio` | text NOT NULL | 1–500 chars |
 | `relationship_intent` | text NULL | `casual` / `serious` / `friendship` / `not_sure` |
 | `height_cm` | smallint NULL | 100–250 |
 | `hometown` | text NULL | ≤ 100 chars |
+| `motivations` | text[] NOT NULL | default `[]`; "why I'm here" — values restricted by CHECK to `dating` / `making_friends` / `confidence_and_communication`; multiple selections allowed (Phase 9.3) |
 | `profile_prompts` | jsonb NOT NULL | default `[]`; must be a JSON array (structure TBD) |
 | `social_links` | jsonb NOT NULL | default `{}`; must be a JSON object (structure TBD) |
 | `created_at` / `updated_at` | timestamptz NOT NULL | `updated_at` maintained by trigger |
@@ -91,6 +98,25 @@ date, not a hardcoded date** (verified by tests: exactly-18-today passes,
 
 Primary key `(profile_id, interest_id)` prevents duplicate associations.
 
+#### `custom_interests` — user-created interest names (Phase 9.3)
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid PK | default `gen_random_uuid()` |
+| `profile_id` | uuid NOT NULL | FK → `profiles(id)` |
+| `name` | text NOT NULL | 1–40 chars, no surrounding whitespace |
+| `created_at` / `updated_at` | timestamptz NOT NULL | `updated_at` maintained by trigger |
+
+Deliberately **separate from the shared `interests` catalog**: custom
+interests are user-owned and never pollute the read-only reference data.
+Uniqueness is **per profile and case-insensitive** — unique index on
+`(profile_id, lower(name))`, so two users may both own "Indie Game Design"
+while one user cannot own both "gaming" and "Gaming". A custom name that
+case-insensitively duplicates a catalog entry is rejected by the API
+(catalog entries should be selected instead) so the two sources never
+overlap for future interest search/filtering. Catalog + custom interests
+share one combined budget of 8 per profile, enforced by the API layer.
+
 #### `profile_photos` — ordered photo records (binaries in Supabase Storage)
 
 | Column | Type | Notes |
@@ -108,6 +134,7 @@ Primary key `(profile_id, interest_id)` prevents duplicate associations.
 auth.users ──1:1── profiles ──N:1── universities
                        │
                        ├──1:N── profile_photos
+                       ├──1:N── custom_interests
                        └──N:M── interests (via profile_interests)
 ```
 
@@ -119,6 +146,8 @@ auth.users ──1:1── profiles ──N:1── universities
   still referenced cannot be deleted.
 - `profile_interests.profile_id` / `.interest_id` — both **ON DELETE
   CASCADE**; removing a profile or an interest removes its associations.
+- `custom_interests.profile_id → profiles(id)` **ON DELETE CASCADE** —
+  custom interests die with the profile.
 - `profile_photos.profile_id → profiles(id)` **ON DELETE CASCADE** — photo
   rows die with the profile (Storage object cleanup remains an application
   responsibility).
@@ -128,15 +157,18 @@ auth.users ──1:1── profiles ──N:1── universities
 - Uniqueness: `profiles.auth_user_id` (1:1 with auth); case-insensitive
   university identity `(lower(name), lower(city), lower(coalesce(state,'')),
   lower(country))`; case-insensitive `interests.name`
-  (`lower(name)`); `profile_interests` PK; `profile_photos.storage_path`;
+  (`lower(name)`); per-profile case-insensitive
+  `custom_interests (profile_id, lower(name))` (Phase 9.3);
+  `profile_interests` PK; `profile_photos.storage_path`;
   `profile_photos (profile_id, position)` (no duplicate ordering); partial
   unique index `profile_photos (profile_id) WHERE is_primary` (at most one
   primary photo per profile).
 - Value checks: gender / seeking / relationship-intent sets, academic year
-  1–8, height 100–250, position ≥ 1, text length + `btrim` checks on
-  user-supplied strings, JSONB shape checks for prompts/social links.
+  1–6, motivation value set (`profiles_motivations_valid`), height 100–250,
+  position ≥ 1, text length + `btrim` checks on user-supplied strings,
+  JSONB shape checks for prompts/social links.
 - Secondary indexes: `profiles(university_id)`,
-  `profile_interests(interest_id)`.
+  `profile_interests(interest_id)`, `custom_interests(profile_id)`.
 
 ### Row Level Security
 
@@ -148,6 +180,7 @@ RLS is enabled on **all five tables** (deny-by-default). Policies:
 | `interests` | `SELECT` for `anon, authenticated` (`using (true)`). No mutation policies. |
 | `profiles` | Owner-only `SELECT`/`INSERT`/`UPDATE`/`DELETE` for `authenticated`: `auth_user_id = (select auth.uid())` (`WITH CHECK` on insert/update — a user cannot adopt or change to another user's identity). |
 | `profile_interests` | Owner-only DML for `authenticated`: row belongs to the caller via `exists (select 1 from profiles p where p.id = profile_id and p.auth_user_id = (select auth.uid()))`. |
+| `custom_interests` | Owner-only DML for `authenticated` (same `exists` predicate) plus a verified-viewer cross-read `SELECT` policy mirroring `profile_interests` (Phase 9.3). |
 | `profile_photos` | Owner-only DML for `authenticated`: same `exists` predicate as `profile_interests`. |
 
 Supporting behavior:

@@ -56,7 +56,10 @@ export interface DiscoveryCandidate {
   relationship_intent: string | null;
   height_cm: number | null;
   hometown: string | null;
-  interests: { id: string; name: string }[];
+  /** "Why I'm here" — controlled motivation values. */
+  motivations: string[];
+  /** Merged catalog + custom interests with a source discriminator. */
+  interests: { id: string; name: string; source: "catalog" | "custom" }[];
   profile_prompts: DiscoveryPrompt[];
   photos: DiscoveryPhoto[];
 }

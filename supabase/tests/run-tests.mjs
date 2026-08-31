@@ -204,7 +204,7 @@ let submissionV2; // V's resubmission (PENDING -> VERIFIED)
 // Tests
 // ============================================================================
 
-test('01 · migrations create exactly the thirteen expected tables on a clean database', async () => {
+test('01 · migrations create exactly the fourteen expected tables on a clean database', async () => {
   const t = await rows(`
     select table_name from information_schema.tables
     where table_schema = 'public' and table_type = 'BASE TABLE'
@@ -213,6 +213,7 @@ test('01 · migrations create exactly the thirteen expected tables on a clean da
     t.map((r) => r.table_name).sort(),
     [
       'blocks',
+      'custom_interests',
       'dating_actions',
       'interests',
       'matches',
@@ -235,7 +236,7 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'r'
   `);
-  assert.equal(tables.length, 13);
+  assert.equal(tables.length, 14);
   for (const t of tables) {
     assert.equal(t.relrowsecurity, true, `${t.relname} must have RLS enabled`);
   }
@@ -258,6 +259,155 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
   assert.equal(byTable['messages'], 1); // select_participant (active match, no active block)
   assert.equal(byTable['blocks'], 3); // insert_own + select_own_outgoing + delete_own
   assert.equal(byTable['reports'], 2); // insert_own + select_staff
+  assert.equal(byTable['custom_interests'], 5); // 4 owner + _select_verified
+});
+
+// Phase 9.3 — academic year 1–6, motivations, custom interests.
+
+test('phase 9.3 · academic_year outside 1–6 is rejected by the database', async () => {
+  await actAs(userA.id);
+  const valid = await rows(
+    `update public.profiles set academic_year = 6 where id = $1 returning id`,
+    [profileA.id]
+  );
+  assert.equal(valid.length, 1);
+  for (const bad of [0, 7, 8]) {
+    await assert.rejects(
+      () =>
+        rows(
+          `update public.profiles set academic_year = $2 where id = $1 returning id`,
+          [profileA.id, bad]
+        ),
+      /profiles_academic_year_valid/
+    );
+  }
+  await rows(`update public.profiles set academic_year = 1 where id = $1`, [profileA.id]);
+});
+
+test('phase 9.3 · motivations accepts only the controlled value set', async () => {
+  await actAs(userA.id);
+  const saved = await rows(
+    `update public.profiles set motivations = $1::text[] where id = $2 returning motivations`,
+    ['{dating,confidence_and_communication}', profileA.id]
+  );
+  assert.deepEqual(saved[0].motivations, ['dating', 'confidence_and_communication']);
+  // Column default is the empty array.
+  await rows(`update public.profiles set motivations = '{}'::text[] where id = $1`, [profileA.id]);
+  const empty = await rows(`select motivations from public.profiles where id = $1`, [profileA.id]);
+  assert.deepEqual(empty[0].motivations, []);
+  // Unknown values are rejected by the CHECK.
+  await assert.rejects(
+    () =>
+      rows(
+        `update public.profiles set motivations = '{friendship}'::text[] where id = $1`,
+        [profileA.id]
+      ),
+    /profiles_motivations_valid/
+  );
+  await rows(`update public.profiles set motivations = '{}'::text[] where id = $1`, [profileA.id]);
+});
+
+test('phase 9.3 · custom interests are owner-scoped by RLS and case-insensitively unique per profile', async () => {
+  // A creates two custom interests on their own profile.
+  await actAs(userA.id);
+  const created = await rows(
+    `insert into public.custom_interests (profile_id, name)
+     values ($1, 'Indie Game Design'), ($1, 'knit')
+     returning id, name`,
+    [profileA.id]
+  );
+  assert.equal(created.length, 2);
+
+  // Per-profile case-insensitive uniqueness (same owner, different case).
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.custom_interests (profile_id, name) values ($1, 'KNIT')`,
+        [profileA.id]
+      ),
+    'custom_interests_profile_name_lower_key'
+  );
+
+  // The other profile may own the same name — uniqueness is per profile.
+  await actAs(userB.id);
+  await one(
+    `insert into public.custom_interests (profile_id, name) values ($1, 'KNIT') returning id`,
+    [profileB.id]
+  );
+
+  // Owner reads exactly their own rows.
+  await actAs(userA.id);
+  const mine = await rows(`select name from public.custom_interests order by name`);
+  assert.deepEqual(mine.map((r) => r.name), ['Indie Game Design', 'knit']);
+
+  // B cannot see A's rows and cannot delete them (RLS filters the DELETE).
+  await actAs(userB.id);
+  const crossRead = await rows(`select * from public.custom_interests`);
+  assert.equal(crossRead.length, 1); // only B's own 'KNIT'
+  assert.equal(
+    await touched(
+      `delete from public.custom_interests where profile_id = $1 returning 1`,
+      [profileA.id]
+    ),
+    0
+  );
+
+  // B cannot insert into A's profile (WITH CHECK violation).
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.custom_interests (profile_id, name) values ($1, 'hijack')`,
+        [profileA.id]
+      ),
+    'row-level security'
+  );
+
+  // Name rule: 1–40 trimmed characters.
+  await actAsService();
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.custom_interests (profile_id, name) values ($1, '  ')`,
+        [profileA.id]
+      ),
+    'custom_interests_name_valid'
+  );
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.custom_interests (profile_id, name) values ($1, repeat('x', 41))`,
+        [profileA.id]
+      ),
+    'custom_interests_name_valid'
+  );
+
+  // Clean up — later tests must not see these rows.
+  await rows(`delete from public.custom_interests where profile_id = $1`, [profileA.id]);
+  await rows(`delete from public.custom_interests where profile_id = $1`, [profileB.id]);
+});
+
+test('phase 9.3 · deleting the auth user cascades custom interests away', async () => {
+  await actAsService();
+  const throwawayUser = await one(
+    `insert into auth.users (email) values ('cascade-check@example.test') returning id`
+  );
+  const throwawayProfile = await one(
+    `insert into public.profiles ${PROFILE_COLUMNS}
+     values ($1, 'Cara', current_date - interval '20 years', $2,
+             'Design', 2, 'woman', 'men', 'Temporary profile')
+     returning id`,
+    [throwawayUser.id, university.id]
+  );
+  await one(
+    `insert into public.custom_interests (profile_id, name)
+     values ($1, 'Cascade Check') returning id`,
+    [throwawayProfile.id]
+  );
+  await rows(`delete from auth.users where id = $1`, [throwawayUser.id]);
+  assert.equal(
+    (await rows(`select 1 from public.custom_interests where profile_id = $1`, [throwawayProfile.id])).length,
+    0
+  );
 });
 
 test('03 · profile links 1:1 to the auth user (owner can create and read it)', async () => {

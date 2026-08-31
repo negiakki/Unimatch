@@ -43,7 +43,9 @@ const EMPTY_VALUES: ProfileFormValues = {
   relationship_intent: "",
   height_cm: "",
   hometown: "",
+  motivations: [],
   interest_ids: [],
+  custom_interest_names: [],
 };
 
 const FOCUS_RING =

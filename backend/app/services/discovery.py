@@ -72,7 +72,7 @@ MAX_LIMIT = 50
 _CANDIDATE_COLUMNS = (
     "id,first_name,date_of_birth,university_id,course,academic_year,gender,"
     "seeking_gender,bio,relationship_intent,height_cm,hometown,profile_prompts,"
-    "created_at,universities(id,name,city,state,country)"
+    "motivations,created_at,universities(id,name,city,state,country)"
 )
 
 _INTEREST_COLUMNS = "id,name"
@@ -433,6 +433,13 @@ def _enrich_page(
 def _interests_by_profile(
     supabase: Client, profile_ids: list[str]
 ) -> dict[str, list[dict[str, Any]]]:
+    """Resolve each candidate's interests with a source discriminator.
+
+    Merges catalog entries (source `"catalog"`) and the candidate's own
+    custom interests (source `"custom"`) so clients can distinguish the two.
+    Two batched queries cover the catalog path (links then names) plus one
+    for custom interests — no N+1 fan-out.
+    """
     try:
         links_response = (
             supabase.table("profile_interests")
@@ -454,7 +461,15 @@ def _interests_by_profile(
                 catalog[str(row["id"])] = {
                     "id": str(row["id"]),
                     "name": row.get("name"),
+                    "source": "catalog",
                 }
+        custom_response = (
+            supabase.table("custom_interests")
+            .select("id,profile_id,name")
+            .in_("profile_id", profile_ids)
+            .execute()
+        )
+        custom_rows = getattr(custom_response, "data", None) or []
     except Exception as exc:
         logger.exception("Candidate interests lookup failed")
         raise ServiceUnavailableError(
@@ -468,6 +483,16 @@ def _interests_by_profile(
         interest = catalog.get(str(link["interest_id"]))
         if profile_id in by_profile and interest is not None:
             by_profile[profile_id].append(interest)
+    for row in custom_rows:
+        profile_id = str(row["profile_id"])
+        if profile_id in by_profile:
+            by_profile[profile_id].append(
+                {
+                    "id": str(row["id"]),
+                    "name": row.get("name"),
+                    "source": "custom",
+                }
+            )
     for entries in by_profile.values():
         entries.sort(key=lambda item: (item["name"] or "", item["id"]))
     return by_profile
@@ -525,7 +550,8 @@ def _candidate_payload(
 
     Only the documented response fields are returned. `date_of_birth` becomes
     `age`; auth_user_id, seeking_gender, verification status, storage_path,
-    and timestamps are deliberately excluded.
+    and timestamps are deliberately excluded. Interests arrive pre-merged
+    with a `source` discriminator (catalog vs custom).
     """
     university = row.get("universities") or {}
     return {
@@ -546,6 +572,7 @@ def _candidate_payload(
         "relationship_intent": row.get("relationship_intent"),
         "height_cm": row.get("height_cm"),
         "hometown": row.get("hometown"),
+        "motivations": row.get("motivations") or [],
         "interests": interests,
         "profile_prompts": row.get("profile_prompts") or [],
         "photos": photos,

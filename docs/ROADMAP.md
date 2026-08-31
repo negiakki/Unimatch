@@ -33,6 +33,21 @@ authoritative specification.
   `GET /interests` catalog; up to 8 selections per profile, validated
   server-side, replace-set updates on edit)
 
+## Phase 9.3 — Profile preferences (custom interests, motivations, academic year) ✅ (complete)
+
+- Custom interests: user-owned `custom_interests` table kept separate from
+  the read-only catalog; per-profile case-insensitive uniqueness, 1–40 char
+  names, catalog-collision rejection, shared combined budget of 8 with
+  catalog selections, replace-set updates — **implemented**
+- Motivations ("Why I'm here"): `profiles.motivations text[]` with a
+  CHECK-controlled value set (`dating`, `making_friends`,
+  `confidence_and_communication`); 1–3 selections via the API, optional/
+  backward-compatible default `[]` — **implemented**
+- Academic year tightened 1–8 → **1–6** across DB CHECK, Pydantic schemas,
+  frontend options/validation, tests, and docs — **implemented**
+- Discovery responses expose `motivations` and merged interests with a
+  `source` discriminator (`catalog` vs `custom`) — **implemented**
+
 ## Phase 4 — Student ID verification + manual review
 
 - Student ID upload to private bucket → `PENDING`

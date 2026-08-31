@@ -2,11 +2,15 @@
 
 import { useState, type ReactNode } from "react";
 
-import { MAX_INTERESTS, type Interest } from "@/lib/api/interests";
-import type {
-  ProfileFieldErrors,
-  ProfileFormValues,
-  University,
+import type { Interest } from "@/lib/api/interests";
+import {
+  MAX_COMBINED_INTERESTS,
+  MAX_CUSTOM_INTEREST_LENGTH,
+  MOTIVATION_OPTIONS,
+  type ProfileFieldErrors,
+  type ProfileFormValues,
+  type ProfileMotivation,
+  type University,
 } from "@/lib/api/profile";
 
 /**
@@ -22,9 +26,7 @@ const FOCUS_RING =
 
 const INPUT_CLASSES = `w-full rounded-2xl border border-line bg-background px-4 py-3.5 text-[15px] text-ink shadow-card placeholder:text-muted/60 focus:border-accent disabled:opacity-40 ${FOCUS_RING}`;
 
-// ponytail: UI offers years 1–6 per product scope while the backend + DB
-// still accept 1–8; tighten the backend contract to 1–6 in a coordinated
-// change (routes + migration + tests) before ever widening this list.
+// Product scope: UniMatch covers years 1–6 end to end (UI, API, DB).
 const ACADEMIC_YEARS = [1, 2, 3, 4, 5, 6];
 
 const GENDERS: { value: string; label: string }[] = [
@@ -143,6 +145,39 @@ export function ProfileFormFields({
       ? values.interest_ids.filter((id) => id !== interestId)
       : [...values.interest_ids, interestId];
     onChange({ interest_ids: next });
+  }
+
+  function toggleMotivation(motivation: ProfileMotivation) {
+    const selected = values.motivations.includes(motivation);
+    const next = selected
+      ? values.motivations.filter((value) => value !== motivation)
+      : [...values.motivations, motivation];
+    onChange({ motivations: next });
+  }
+
+  function addCustomInterest(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      return;
+    }
+    const folded = trimmed.toLowerCase();
+    const duplicatesExisting = values.custom_interest_names.some(
+      (existing) => existing.toLowerCase() === folded,
+    );
+    if (duplicatesExisting) {
+      return;
+    }
+    onChange({
+      custom_interest_names: [...values.custom_interest_names, trimmed],
+    });
+  }
+
+  function removeCustomInterest(name: string) {
+    onChange({
+      custom_interest_names: values.custom_interest_names.filter(
+        (existing) => existing !== name,
+      ),
+    });
   }
 
   return (
@@ -341,16 +376,51 @@ export function ProfileFormFields({
           </Field>
         </FormSection>
 
+        <FormSection
+          title="Why I'm here"
+          hint="Pick every reason that applies — this shapes who you meet."
+        >
+          <div>
+            <div className="flex flex-wrap gap-2">
+              {MOTIVATION_OPTIONS.map((option) => {
+                const selected = values.motivations.includes(option.value);
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={selected}
+                    disabled={disabled}
+                    onClick={() => toggleMotivation(option.value)}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
+                      selected
+                        ? "border-accent bg-accent text-white shadow-card"
+                        : "border-line bg-background text-ink hover:border-accent/50"
+                    } ${FOCUS_RING}`}
+                  >
+                    {selected && <CheckIcon className="size-3.5" />}
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+            <FieldError message={errors.motivations} />
+          </div>
+        </FormSection>
+
         <FormSection title="Your interests">
           <InterestPicker
             interests={interests}
             interestsLoading={interestsLoading}
             interestsError={interestsError}
             selectedIds={values.interest_ids}
+            customNames={values.custom_interest_names}
             onToggle={toggleInterest}
+            onAddCustom={addCustomInterest}
+            onRemoveCustom={removeCustomInterest}
             onRetry={onRetryInterests}
           />
           <FieldError message={errors.interest_ids} />
+          <FieldError message={errors.custom_interest_names} />
         </FormSection>
       </fieldset>
     </div>
@@ -358,48 +428,94 @@ export function ProfileFormFields({
 }
 
 /**
- * Multi-select interest chips backed by the server catalog. Toggling adds or
- * removes a single selection; at the limit, further selections are refused
- * with a clear message (deselection always stays possible). The parent owns
- * the selection state — this component only turns clicks into toggles.
+ * Multi-select interest chips backed by the server catalog plus user-created
+ * custom interests. Catalog toggles add or remove a selection; custom
+ * interests are added by name (1–40 chars, no case-insensitive duplicate of
+ * a catalog entry or an existing custom name) and removed with their chip.
+ * Catalog and custom interests share one combined budget — at the limit,
+ * further additions are refused with a clear message (deselection always
+ * stays possible). The parent owns the selection state.
  */
 function InterestPicker({
   interests,
   interestsLoading,
   interestsError,
   selectedIds,
+  customNames,
   onToggle,
+  onAddCustom,
+  onRemoveCustom,
   onRetry,
 }: {
   interests: Interest[];
   interestsLoading: boolean;
   interestsError: string | null;
   selectedIds: string[];
+  customNames: string[];
   onToggle: (interestId: string) => void;
+  onAddCustom: (name: string) => void;
+  onRemoveCustom: (name: string) => void;
   onRetry?: () => void;
 }) {
-  const [refusedExtra, setRefusedExtra] = useState(false);
-  const selectedCount = selectedIds.length;
-  const atLimit = selectedCount >= MAX_INTERESTS;
+  const [draftName, setDraftName] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const selectedCount = selectedIds.length + customNames.length;
+  const atLimit = selectedCount >= MAX_COMBINED_INTERESTS;
 
   function handleToggle(interest: Interest) {
     const isSelected = selectedIds.includes(interest.id);
     if (!isSelected && atLimit) {
-      setRefusedExtra(true);
+      setNotice(limitMessage());
       return;
     }
-    setRefusedExtra(false);
+    setNotice(null);
     onToggle(interest.id);
+  }
+
+  function limitMessage(): string {
+    return `That's the maximum of ${MAX_COMBINED_INTERESTS} interests — deselect one to pick another.`;
+  }
+
+  function handleAddCustom() {
+    const trimmed = draftName.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (trimmed.length > MAX_CUSTOM_INTEREST_LENGTH) {
+      setNotice(
+        `Custom interests must be ${MAX_CUSTOM_INTEREST_LENGTH} characters or fewer.`,
+      );
+      return;
+    }
+    const folded = trimmed.toLowerCase();
+    if (interests.some((interest) => interest.name.toLowerCase() === folded)) {
+      setNotice(
+        `"${trimmed}" is already in the catalog — select it from the chips instead.`,
+      );
+      return;
+    }
+    if (customNames.some((existing) => existing.toLowerCase() === folded)) {
+      setNotice("You've already added that one.");
+      return;
+    }
+    if (atLimit) {
+      setNotice(limitMessage());
+      return;
+    }
+    setNotice(null);
+    onAddCustom(trimmed);
+    setDraftName("");
   }
 
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
         <p className="text-sm text-muted">
-          Pick up to {MAX_INTERESTS} things you love.
+          Pick up to {MAX_COMBINED_INTERESTS} things you love — add your own if
+          they&apos;re missing.
         </p>
         <span className="shrink-0 text-xs font-medium text-muted">
-          {selectedCount}/{MAX_INTERESTS}
+          {selectedCount}/{MAX_COMBINED_INTERESTS}
         </span>
       </div>
 
@@ -409,21 +525,6 @@ function InterestPicker({
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <p role="alert" className="text-sm font-medium text-red-600">
             {interestsError}
-          </p>
-          {onRetry && (
-            <button
-              type="button"
-              onClick={onRetry}
-              className={`rounded-full border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-            >
-              Retry
-            </button>
-          )}
-        </div>
-      ) : interests.length === 0 ? (
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <p role="alert" className="text-sm font-medium text-red-600">
-            No interests are available right now.
           </p>
           {onRetry && (
             <button
@@ -456,18 +557,62 @@ function InterestPicker({
               </button>
             );
           })}
+          {customNames.map((name) => (
+            <span
+              key={name}
+              className="inline-flex items-center gap-1.5 rounded-full border border-accent bg-accent/10 px-4 py-2 text-sm font-medium text-ink"
+            >
+              {name}
+              <button
+                type="button"
+                aria-label={`Remove ${name}`}
+                onClick={() => {
+                  setNotice(null);
+                  onRemoveCustom(name);
+                }}
+                className={`rounded-full text-muted transition-colors hover:text-ink ${FOCUS_RING}`}
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {!interestsLoading && !interestsError && (
+        <div className="mt-3 flex max-w-sm items-center gap-2">
+          <input
+            id="profile-custom-interest"
+            type="text"
+            autoComplete="off"
+            placeholder="Add your own…"
+            maxLength={MAX_CUSTOM_INTEREST_LENGTH + 1}
+            value={draftName}
+            onChange={(event) => setDraftName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                handleAddCustom();
+              }
+            }}
+            className={INPUT_CLASSES}
+          />
+          <button
+            type="button"
+            onClick={handleAddCustom}
+            className={`shrink-0 rounded-2xl border border-line bg-surface px-4 py-3 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+          >
+            Add
+          </button>
         </div>
       )}
 
       <p aria-live="polite" className="mt-2 min-h-5 text-xs font-medium">
-        {refusedExtra || atLimit ? (
-          <span className="text-accent">
-            That&apos;s the maximum of {MAX_INTERESTS} interests — deselect one
-            to pick another.
-          </span>
+        {notice ? (
+          <span className="text-accent">{notice}</span>
         ) : (
           <span className="sr-only">
-            {selectedCount} of {MAX_INTERESTS} interests selected
+            {selectedCount} of {MAX_COMBINED_INTERESTS} interests selected
           </span>
         )}
       </p>
@@ -488,6 +633,22 @@ function CheckIcon({ className }: { className?: string }) {
       className={className}
     >
       <path d="m5 13 4 4L19 7" />
+    </svg>
+  );
+}
+
+function XIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M6 6l12 12M18 6L6 18" />
     </svg>
   );
 }

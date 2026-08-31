@@ -5,19 +5,28 @@ resolved from the Supabase bearer token). Client-supplied identifiers —
 including an `auth_user_id` field in a request body — never influence which
 profile is read, created, or updated: the value written to the database comes
 only from the token. Field validation happens in the route layer (Pydantic);
-this module re-checks the university reference and every selected interest
-server-side and translates database constraint failures (unique profile,
-FK, CHECKs) into the existing structured error envelope instead of leaking
-raw Postgres messages.
+this module re-checks the university reference, every selected interest id,
+and every custom interest name server-side and translates database
+constraint failures (unique profile, FK, CHECKs) into the existing
+structured error envelope instead of leaking raw Postgres messages.
 `profile_prompts` / `social_links` are intentionally untouched here — they
 arrive with their own slice; database defaults apply on create and updates
 never modify them.
 
 Interests: the `interests` table is a read-only catalog; selections live in
 `profile_interests` and are written only for the profile resolved from the
-token. Updates use replace-set semantics (delete the caller's existing links,
-insert the validated new set); the maximum selection size is enforced in the
-route layer (Pydantic) and re-checked here.
+token. Custom interests are user-owned rows in `custom_interests` (kept
+strictly separate from the shared catalog) and are written only for the
+same token-resolved profile, with replace-set semantics: rows absent from
+the submitted set are deleted, new names are inserted. A custom name that
+case-insensitively duplicates a catalog entry is rejected (422) so the
+two sources never overlap for future search/filtering. Catalog ids and
+custom names together are capped at `MAX_PROFILE_INTERESTS` (8).
+Motivations ("why I'm here") are a list of controlled values validated
+against the same value set the database CHECK enforces; duplicates are
+rejected. Updates use replace-set semantics (delete the caller's existing
+links, insert the validated new set); the maximum selection size is
+enforced in the route layer (Pydantic) and re-checked here.
 """
 
 import logging
@@ -41,15 +50,28 @@ logger = logging.getLogger(__name__)
 _PROFILE_COLUMNS = (
     "id,first_name,date_of_birth,university_id,course,academic_year,"
     "gender,seeking_gender,bio,relationship_intent,height_cm,hometown,"
-    "profile_prompts,social_links,created_at,updated_at"
+    "motivations,profile_prompts,social_links,created_at,updated_at"
 )
 
 _UNIVERSITY_COLUMNS = "id,name,city,state,country"
 
 _INTEREST_COLUMNS = "id,name"
 
-# Product rule (PRD): a profile carries at most 8 interests.
+_CUSTOM_INTEREST_COLUMNS = "id,profile_id,name"
+
+# Product rule (PRD): a profile carries at most 8 interests — catalog and
+# custom interests share one combined budget.
 MAX_PROFILE_INTERESTS = 8
+
+MAX_CUSTOM_INTEREST_NAME_LENGTH = 40
+
+# Mirrors profiles_motivations_valid in the database — the DB CHECK remains
+# the authority; this is the route/service-side mirror for precise 422s.
+ALLOWED_MOTIVATIONS = (
+    "dating",
+    "making_friends",
+    "confidence_and_communication",
+)
 
 
 def get_own_profile(supabase: Client, auth_user_id: UUID) -> dict[str, Any] | None:
@@ -89,7 +111,8 @@ def get_own_profile_with_interests(
 ) -> dict[str, Any]:
     """Return the caller's profile with its selected interests attached.
 
-    The interests list is client-safe catalog data (`id` + `name`), ordered
+    The interests list is client-safe data (`id` + `name` + `source`), merged
+    from the read-only catalog and the caller's own custom interests, ordered
     deterministically by name; an empty selection is `[]`.
     """
     profile = get_own_profile_or_not_found(supabase, auth_user_id)
@@ -103,14 +126,17 @@ def create_profile(
     """Create the authenticated user's profile (auth_user_id from the token).
 
     A profile already existing for the identity is a clean 409; an unknown
-    university or interest or a database CHECK violation surfaces as a
-    structured 422. Interest links are written after the profile insert; a
-    failure there removes the just-created profile so a retry never ends in a
-    half-created state.
+    university or interest, an invalid custom interest name, or a database
+    CHECK violation surfaces as a structured 422. Interest links and custom
+    interests are written after the profile insert; a failure there removes
+    the just-created profile so a retry never ends in a half-created state.
     """
     interest_ids = _extract_interest_ids(values)
+    custom_names = _extract_custom_interest_names(values)
+    _extract_motivations(values)
     ensure_university_exists(supabase, values["university_id"])
     ensure_interests_exist(supabase, interest_ids)
+    ensure_custom_interest_names_valid(supabase, custom_names)
 
     payload = {key: _serialize(key, value) for key, value in values.items()}
     payload["auth_user_id"] = str(auth_user_id)
@@ -129,6 +155,7 @@ def create_profile(
 
     try:
         _replace_profile_interests(supabase, profile["id"], interest_ids)
+        _replace_profile_custom_interests(supabase, profile["id"], custom_names)
     except Exception:
         # Compensating delete: never leave a profile behind without the
         # interests the caller asked for (or a misleading 503).
@@ -148,13 +175,17 @@ def update_own_profile(
 
     `auth_user_id` is never part of `values` and never accepted from the
     client, so ownership cannot be changed. An unknown university or
-    interest or a database CHECK violation surfaces as a structured 422.
-    Interests are replaced as a set for the profile resolved from the token;
-    unrelated profile fields are untouched by that step.
+    interest, an invalid custom interest name, or a database CHECK violation
+    surfaces as a structured 422. Interests and custom interests are
+    replaced as a set for the profile resolved from the token; unrelated
+    profile fields are untouched by that step.
     """
     interest_ids = _extract_interest_ids(values)
+    custom_names = _extract_custom_interest_names(values)
+    _extract_motivations(values)
     ensure_university_exists(supabase, values["university_id"])
     ensure_interests_exist(supabase, interest_ids)
+    ensure_custom_interest_names_valid(supabase, custom_names)
 
     payload = {key: _serialize(key, value) for key, value in values.items()}
     try:
@@ -173,6 +204,7 @@ def update_own_profile(
         )
     profile = dict(rows[0])
     _replace_profile_interests(supabase, profile["id"], interest_ids)
+    _replace_profile_custom_interests(supabase, profile["id"], custom_names)
     profile["interests"] = get_profile_interests(supabase, profile["id"])
     return profile
 
@@ -263,12 +295,13 @@ def list_interests(supabase: Client) -> list[dict[str, Any]]:
 
 
 def get_profile_interests(supabase: Client, profile_id: str) -> list[dict[str, Any]]:
-    """Return a profile's selected interests as client-safe catalog entries.
+    """Return a profile's interests as client-safe entries with a source tag.
 
-    Resolves the profile's `profile_interests` links against the catalog and
-    orders deterministically by (name, id) so the response is stable. The
-    profile id is always derived server-side from the token, never accepted
-    from the client.
+    Merges the profile's `profile_interests` catalog links (source
+    `"catalog"`) with its own `custom_interests` rows (source `"custom"`)
+    and orders deterministically by (name, id) so the response is stable.
+    The profile id is always derived server-side from the token, never
+    accepted from the client.
     """
     if not profile_id:
         return []
@@ -280,16 +313,23 @@ def get_profile_interests(supabase: Client, profile_id: str) -> list[dict[str, A
             .execute()
         )
         links = getattr(links_response, "data", None) or []
-        if not links:
-            return []
+        catalog_rows: list[dict[str, Any]] = []
         interest_ids = [link["interest_id"] for link in links]
-        catalog_response = (
-            supabase.table("interests")
-            .select(_INTEREST_COLUMNS)
-            .in_("id", interest_ids)
+        if interest_ids:
+            catalog_response = (
+                supabase.table("interests")
+                .select(_INTEREST_COLUMNS)
+                .in_("id", interest_ids)
+                .execute()
+            )
+            catalog_rows = getattr(catalog_response, "data", None) or []
+        custom_response = (
+            supabase.table("custom_interests")
+            .select(_CUSTOM_INTEREST_COLUMNS)
+            .eq("profile_id", str(profile_id))
             .execute()
         )
-        rows = getattr(catalog_response, "data", None) or []
+        custom_rows = getattr(custom_response, "data", None) or []
     except Exception as exc:
         logger.exception("Profile interests lookup failed")
         raise ServiceUnavailableError(
@@ -297,7 +337,11 @@ def get_profile_interests(supabase: Client, profile_id: str) -> list[dict[str, A
             code="database_unavailable",
         ) from exc
     interests = [
-        {"id": str(row["id"]), "name": row.get("name")} for row in rows
+        {"id": str(row["id"]), "name": row.get("name"), "source": "catalog"}
+        for row in catalog_rows
+    ] + [
+        {"id": str(row["id"]), "name": row.get("name"), "source": "custom"}
+        for row in custom_rows
     ]
     interests.sort(key=lambda interest: (interest["name"] or "", interest["id"]))
     return interests
@@ -385,6 +429,127 @@ def _replace_profile_interests(
         raise _translate_write_error(exc, "update") from exc
 
 
+def ensure_custom_interest_names_valid(
+    supabase: Client, names: list[str]
+) -> None:
+    """Reject custom interest names that collide with the shared catalog.
+
+    A custom name that case-insensitively matches a catalog entry is refused
+    with a precise 422 so the two interest sources never overlap (the user
+    should select the catalog entry instead). Per-profile case-insensitive
+    uniqueness within the custom set is guaranteed upstream (Pydantic
+    normalization) and again at the database
+    (`custom_interests_profile_name_lower_key`).
+    """
+    if not names:
+        return
+    try:
+        response = supabase.table("interests").select("name").execute()
+    except Exception as exc:
+        logger.exception("Interest catalog lookup failed")
+        raise ServiceUnavailableError(
+            "The profile is temporarily unavailable.",
+            code="database_unavailable",
+        ) from exc
+    rows = getattr(response, "data", None) or []
+    catalog_names = {str(row.get("name") or "").casefold() for row in rows}
+    for name in names:
+        if name.casefold() in catalog_names:
+            raise AppError(
+                f"'{name}' is already in the interest catalog — select it instead "
+                "of adding it as a custom interest.",
+                status_code=422,
+                code="validation_error",
+            )
+
+
+def _extract_custom_interest_names(values: dict[str, Any]) -> list[str]:
+    """Pull custom interest names out of the write values.
+
+    `custom_interest_names` is route-layer input, not a profiles column: it
+    is removed from `values` before the profiles payload is built so it can
+    never leak into the profiles write. Shape and the combined catalog+custom
+    budget are re-checked here as defense-in-depth (the route's Pydantic
+    model is the primary gate); per-item trimming/casing was already
+    normalized by the route layer.
+    """
+    names = values.pop("custom_interest_names", None) or []
+    if not isinstance(names, list) or not all(
+        isinstance(item, str) and item.strip() for item in names
+    ):
+        raise AppError(
+            "custom_interest_names must be a list of non-empty names.",
+            status_code=422,
+            code="validation_error",
+        )
+    folded = [name.casefold() for name in names]
+    if len(set(folded)) != len(folded):
+        raise AppError(
+            "Duplicate custom interests are not allowed.",
+            status_code=422,
+            code="validation_error",
+        )
+    return names
+
+
+def _extract_motivations(values: dict[str, Any]) -> list[str]:
+    """Pull motivations out of the write values (they ARE a profiles column).
+
+    The value set is controlled end-to-end: the route's Literal type is the
+    primary gate, this mirror check keeps the service safe for any future
+    caller, and the database CHECK (`profiles_motivations_valid`) remains
+    the final authority. Duplicates are rejected.
+    """
+    motivations = values.get("motivations")
+    if motivations is None:
+        motivations = []
+        values["motivations"] = motivations
+    if not isinstance(motivations, list) or not all(
+        isinstance(item, str) and item in ALLOWED_MOTIVATIONS for item in motivations
+    ):
+        raise AppError(
+            "motivations must be a list of supported values.",
+            status_code=422,
+            code="validation_error",
+        )
+    if len(set(motivations)) != len(motivations):
+        raise AppError(
+            "motivations must not contain duplicates.",
+            status_code=422,
+            code="validation_error",
+        )
+    if len(motivations) > 3:
+        raise AppError(
+            "You can select at most 3 motivations.",
+            status_code=422,
+            code="validation_error",
+        )
+    return motivations
+
+
+def _replace_profile_custom_interests(
+    supabase: Client, profile_id: str, names: list[str]
+) -> None:
+    """Replace the profile's custom interests with exactly the given set.
+
+    Replace-set semantics: removed names are deleted, new names are inserted
+    (an empty set clears). The caller's rows are addressed only through the
+    token-resolved `profile_id`; the per-profile case-insensitive unique
+    index and the FK remain the database-level guards.
+    """
+    try:
+        supabase.table("custom_interests").delete().eq(
+            "profile_id", str(profile_id)
+        ).execute()
+        if names:
+            payload = [
+                {"profile_id": str(profile_id), "name": name} for name in names
+            ]
+            supabase.table("custom_interests").insert(payload).execute()
+    except Exception as exc:
+        raise _translate_write_error(exc, "update") from exc
+
+
 def _serialize(key: str, value: Any) -> Any:
     """Convert Python-only types to what PostgREST expects (UUIDs, dates)."""
     if isinstance(value, UUID):
@@ -409,6 +574,32 @@ def _translate_write_error(exc: Exception, operation: str) -> Exception:
     if "profile_interests_pkey" in detail:
         return AppError(
             "Duplicate interests are not allowed.",
+            status_code=422,
+            code="validation_error",
+        )
+    if "custom_interests_profile_name_lower_key" in detail:
+        return AppError(
+            "Duplicate custom interests are not allowed.",
+            status_code=422,
+            code="validation_error",
+        )
+    if "custom_interests_name_valid" in detail:
+        return AppError(
+            "Custom interest names must be 1-40 characters.",
+            status_code=422,
+            code="validation_error",
+        )
+    if "custom_interests_profile_id_fkey" in detail:
+        return ServiceUnavailableError(
+            "The profile could not be saved. Please try again later.",
+            code=(
+                "database_insert_failed" if operation == "insert" else
+                "database_update_failed"
+            ),
+        )
+    if "profiles_motivations_valid" in detail:
+        return AppError(
+            "One or more motivations are not valid.",
             status_code=422,
             code="validation_error",
         )
