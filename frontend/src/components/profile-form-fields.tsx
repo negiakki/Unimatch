@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 
 import type { Interest } from "@/lib/api/interests";
 import {
@@ -14,11 +14,13 @@ import {
 } from "@/lib/api/profile";
 
 /**
- * Presentational profile fields shared by the /onboarding creation form and
- * the /profile/edit form. Pure UI only — validation rules live in the
- * profile API module (UX checks) and the backend (authoritative). Fields are
- * grouped into sections so onboarding reads as a short, intentional flow
- * rather than one long generic form.
+ * Presentational profile fields shared by the /onboarding wizard and the
+ * /profile/edit form. Pure UI only — validation rules live in the profile
+ * API module (UX checks) and the backend (authoritative).
+ *
+ * Fields are exported as small groups (BasicsFields, StudiesFields, …) so
+ * the onboarding wizard can show one group per step, while /profile/edit
+ * composes every group into one long form via ProfileFormFields.
  */
 
 const FOCUS_RING =
@@ -29,20 +31,20 @@ const INPUT_CLASSES = `w-full rounded-2xl border border-line bg-background px-4 
 // Product scope: UniMatch covers years 1–6 end to end (UI, API, DB).
 const ACADEMIC_YEARS = [1, 2, 3, 4, 5, 6];
 
-const GENDERS: { value: string; label: string }[] = [
+export const GENDERS: { value: string; label: string }[] = [
   { value: "woman", label: "Woman" },
   { value: "man", label: "Man" },
   { value: "non_binary", label: "Non-binary" },
   { value: "other", label: "Other" },
 ];
 
-const SEEKING_GENDERS: { value: string; label: string }[] = [
+export const SEEKING_GENDERS: { value: string; label: string }[] = [
   { value: "women", label: "Women" },
   { value: "men", label: "Men" },
   { value: "everyone", label: "Everyone" },
 ];
 
-const RELATIONSHIP_INTENTS: { value: string; label: string }[] = [
+export const RELATIONSHIP_INTENTS: { value: string; label: string }[] = [
   { value: "casual", label: "Casual" },
   { value: "serious", label: "Serious relationship" },
   { value: "friendship", label: "Friendship" },
@@ -70,7 +72,7 @@ function FormSection({
 }: {
   title: string;
   hint?: string;
-  children: ReactNode;
+  children: React.ReactNode;
 }) {
   return (
     <section className="rounded-card border border-line bg-surface p-5 shadow-card">
@@ -96,7 +98,7 @@ function Field({
   label: string;
   optional?: boolean;
   error?: string;
-  children: ReactNode;
+  children: React.ReactNode;
 }) {
   return (
     <div>
@@ -112,47 +114,241 @@ function Field({
   );
 }
 
-interface ProfileFormFieldsProps {
+/** Controlled values + change pipeline shared by every field group. */
+export interface ProfileFieldGroupProps {
   values: ProfileFormValues;
   errors: ProfileFieldErrors;
-  universities: University[];
-  universitiesLoading: boolean;
-  disabled: boolean;
-  interests: Interest[];
-  interestsLoading: boolean;
-  interestsError: string | null;
-  onRetryInterests?: () => void;
   onChange: (patch: Partial<ProfileFormValues>) => void;
 }
 
-export function ProfileFormFields({
+export function BasicsFields({
   values,
   errors,
-  universities,
-  universitiesLoading,
-  disabled,
-  interests,
-  interestsLoading,
-  interestsError,
-  onRetryInterests,
   onChange,
-}: ProfileFormFieldsProps) {
+}: ProfileFieldGroupProps) {
   const maxDate = todayIsoDate();
 
-  function toggleInterest(interestId: string) {
-    const selected = values.interest_ids.includes(interestId);
-    const next = selected
-      ? values.interest_ids.filter((id) => id !== interestId)
-      : [...values.interest_ids, interestId];
-    onChange({ interest_ids: next });
-  }
+  return (
+    <>
+      <Field id="profile-first-name" label="First name" error={errors.first_name}>
+        <input
+          id="profile-first-name"
+          type="text"
+          autoComplete="given-name"
+          placeholder="Jamie"
+          maxLength={50}
+          value={values.first_name}
+          onChange={(event) => onChange({ first_name: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.first_name)}
+        />
+      </Field>
 
+      <Field id="profile-date-of-birth" label="Date of birth" error={errors.date_of_birth}>
+        <input
+          id="profile-date-of-birth"
+          type="date"
+          min="1900-01-01"
+          max={maxDate}
+          autoComplete="bday"
+          value={values.date_of_birth}
+          onChange={(event) => onChange({ date_of_birth: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.date_of_birth)}
+        />
+      </Field>
+
+      <Field id="profile-gender" label="Gender" error={errors.gender}>
+        <select
+          id="profile-gender"
+          value={values.gender}
+          onChange={(event) => onChange({ gender: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.gender)}
+        >
+          <option value="">Select your gender</option>
+          {GENDERS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        id="profile-seeking-gender"
+        label="Interested in"
+        error={errors.seeking_gender}
+      >
+        <select
+          id="profile-seeking-gender"
+          value={values.seeking_gender}
+          onChange={(event) => onChange({ seeking_gender: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.seeking_gender)}
+        >
+          <option value="">Select who you&apos;d like to meet</option>
+          {SEEKING_GENDERS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </>
+  );
+}
+
+export function StudiesFields({
+  values,
+  errors,
+  onChange,
+  universities,
+  universitiesLoading,
+}: ProfileFieldGroupProps & {
+  universities: University[];
+  universitiesLoading: boolean;
+}) {
+  return (
+    <>
+      <Field id="profile-university" label="University" error={errors.university_id}>
+        <select
+          id="profile-university"
+          value={values.university_id}
+          onChange={(event) => onChange({ university_id: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.university_id)}
+        >
+          <option value="">
+            {universitiesLoading
+              ? "Loading universities…"
+              : "Select your university"}
+          </option>
+          {universities.map((university) => (
+            <option key={university.id} value={university.id}>
+              {universityLabel(university)}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field id="profile-course" label="Course" error={errors.course}>
+        <input
+          id="profile-course"
+          type="text"
+          autoComplete="off"
+          placeholder="Computer Science"
+          maxLength={120}
+          value={values.course}
+          onChange={(event) => onChange({ course: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.course)}
+        />
+      </Field>
+
+      <Field id="profile-academic-year" label="Academic year" error={errors.academic_year}>
+        <select
+          id="profile-academic-year"
+          value={values.academic_year}
+          onChange={(event) => onChange({ academic_year: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.academic_year)}
+        >
+          <option value="">Select your year</option>
+          {ACADEMIC_YEARS.map((year) => (
+            <option key={year} value={String(year)}>
+              Year {year}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </>
+  );
+}
+
+export function AboutFields({ values, errors, onChange }: ProfileFieldGroupProps) {
+  return (
+    <Field id="profile-bio" label="Bio" error={errors.bio}>
+      <textarea
+        id="profile-bio"
+        rows={4}
+        placeholder="Tell people a little about yourself…"
+        value={values.bio}
+        onChange={(event) => onChange({ bio: event.target.value })}
+        className={`${INPUT_CLASSES} resize-none`}
+        aria-invalid={Boolean(errors.bio)}
+      />
+      <div className="mt-1 flex items-baseline justify-between gap-3">
+        <FieldError message={errors.bio} />
+        <span className="ml-auto shrink-0 text-xs text-muted">
+          {values.bio.trim().length}/500
+        </span>
+      </div>
+    </Field>
+  );
+}
+
+export function MotivationsFields({
+  values,
+  errors,
+  onChange,
+}: ProfileFieldGroupProps) {
   function toggleMotivation(motivation: ProfileMotivation) {
     const selected = values.motivations.includes(motivation);
     const next = selected
       ? values.motivations.filter((value) => value !== motivation)
       : [...values.motivations, motivation];
     onChange({ motivations: next });
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2">
+        {MOTIVATION_OPTIONS.map((option) => {
+          const selected = values.motivations.includes(option.value);
+          return (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => toggleMotivation(option.value)}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
+                selected
+                  ? "border-accent bg-accent text-white shadow-card"
+                  : "border-line bg-background text-ink hover:border-accent/50"
+              } ${FOCUS_RING}`}
+            >
+              {selected && <CheckIcon className="size-3.5" />}
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+      <FieldError message={errors.motivations} />
+    </div>
+  );
+}
+
+export function InterestsPickerFields({
+  values,
+  errors,
+  onChange,
+  interests,
+  interestsLoading,
+  interestsError,
+  onRetryInterests,
+}: ProfileFieldGroupProps & {
+  interests: Interest[];
+  interestsLoading: boolean;
+  interestsError: string | null;
+  onRetryInterests?: () => void;
+}) {
+  function toggleInterest(interestId: string) {
+    const selected = values.interest_ids.includes(interestId);
+    const next = selected
+      ? values.interest_ids.filter((id) => id !== interestId)
+      : [...values.interest_ids, interestId];
+    onChange({ interest_ids: next });
   }
 
   function addCustomInterest(name: string) {
@@ -181,246 +377,149 @@ export function ProfileFormFields({
   }
 
   return (
+    <>
+      <InterestPicker
+        interests={interests}
+        interestsLoading={interestsLoading}
+        interestsError={interestsError}
+        selectedIds={values.interest_ids}
+        customNames={values.custom_interest_names}
+        onToggle={toggleInterest}
+        onAddCustom={addCustomInterest}
+        onRemoveCustom={removeCustomInterest}
+        onRetry={onRetryInterests}
+      />
+      <FieldError message={errors.interest_ids} />
+      <FieldError message={errors.custom_interest_names} />
+    </>
+  );
+}
+
+export function OptionalFields({
+  values,
+  errors,
+  onChange,
+}: ProfileFieldGroupProps) {
+  return (
+    <>
+      <Field id="profile-relationship-intent" label="Looking for" optional>
+        <select
+          id="profile-relationship-intent"
+          value={values.relationship_intent}
+          onChange={(event) =>
+            onChange({ relationship_intent: event.target.value })
+          }
+          className={INPUT_CLASSES}
+        >
+          <option value="">Prefer not to say</option>
+          {RELATIONSHIP_INTENTS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field id="profile-height" label="Height in cm" optional error={errors.height_cm}>
+        <input
+          id="profile-height"
+          type="number"
+          inputMode="numeric"
+          min={100}
+          max={250}
+          step={1}
+          placeholder="170"
+          value={values.height_cm}
+          onChange={(event) => onChange({ height_cm: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.height_cm)}
+        />
+      </Field>
+
+      <Field id="profile-hometown" label="Hometown" optional error={errors.hometown}>
+        <input
+          id="profile-hometown"
+          type="text"
+          autoComplete="off"
+          placeholder="Springfield"
+          maxLength={100}
+          value={values.hometown}
+          onChange={(event) => onChange({ hometown: event.target.value })}
+          className={INPUT_CLASSES}
+          aria-invalid={Boolean(errors.hometown)}
+        />
+      </Field>
+    </>
+  );
+}
+
+interface ProfileFormFieldsProps {
+  values: ProfileFormValues;
+  errors: ProfileFieldErrors;
+  universities: University[];
+  universitiesLoading: boolean;
+  disabled: boolean;
+  interests: Interest[];
+  interestsLoading: boolean;
+  interestsError: string | null;
+  onRetryInterests?: () => void;
+  onChange: (patch: Partial<ProfileFormValues>) => void;
+}
+
+export function ProfileFormFields({
+  values,
+  errors,
+  universities,
+  universitiesLoading,
+  disabled,
+  interests,
+  interestsLoading,
+  interestsError,
+  onRetryInterests,
+  onChange,
+}: ProfileFormFieldsProps) {
+  return (
     <div className="text-left">
       <fieldset disabled={disabled} className="min-w-0 space-y-5">
         <FormSection title="The basics">
-          <Field id="profile-first-name" label="First name" error={errors.first_name}>
-            <input
-              id="profile-first-name"
-              type="text"
-              autoComplete="given-name"
-              placeholder="Jamie"
-              maxLength={50}
-              value={values.first_name}
-              onChange={(event) => onChange({ first_name: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.first_name)}
-            />
-          </Field>
-
-          <Field id="profile-date-of-birth" label="Date of birth" error={errors.date_of_birth}>
-            <input
-              id="profile-date-of-birth"
-              type="date"
-              min="1900-01-01"
-              max={maxDate}
-              autoComplete="bday"
-              value={values.date_of_birth}
-              onChange={(event) => onChange({ date_of_birth: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.date_of_birth)}
-            />
-          </Field>
+          <BasicsFields values={values} errors={errors} onChange={onChange} />
         </FormSection>
 
         <FormSection
           title="Your studies"
           hint="Your university is matched against your student ID during verification."
         >
-          <Field id="profile-university" label="University" error={errors.university_id}>
-            <select
-              id="profile-university"
-              value={values.university_id}
-              onChange={(event) => onChange({ university_id: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.university_id)}
-            >
-              <option value="">
-                {universitiesLoading
-                  ? "Loading universities…"
-                  : "Select your university"}
-              </option>
-              {universities.map((university) => (
-                <option key={university.id} value={university.id}>
-                  {universityLabel(university)}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field id="profile-course" label="Course" error={errors.course}>
-            <input
-              id="profile-course"
-              type="text"
-              autoComplete="off"
-              placeholder="Computer Science"
-              maxLength={120}
-              value={values.course}
-              onChange={(event) => onChange({ course: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.course)}
-            />
-          </Field>
-
-          <Field id="profile-academic-year" label="Academic year" error={errors.academic_year}>
-            <select
-              id="profile-academic-year"
-              value={values.academic_year}
-              onChange={(event) => onChange({ academic_year: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.academic_year)}
-            >
-              <option value="">Select your year</option>
-              {ACADEMIC_YEARS.map((year) => (
-                <option key={year} value={String(year)}>
-                  Year {year}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <StudiesFields
+            values={values}
+            errors={errors}
+            onChange={onChange}
+            universities={universities}
+            universitiesLoading={universitiesLoading}
+          />
         </FormSection>
 
         <FormSection title="Dating profile">
-          <Field id="profile-gender" label="Gender" error={errors.gender}>
-            <select
-              id="profile-gender"
-              value={values.gender}
-              onChange={(event) => onChange({ gender: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.gender)}
-            >
-              <option value="">Select your gender</option>
-              {GENDERS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field
-            id="profile-seeking-gender"
-            label="Interested in"
-            error={errors.seeking_gender}
-          >
-            <select
-              id="profile-seeking-gender"
-              value={values.seeking_gender}
-              onChange={(event) => onChange({ seeking_gender: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.seeking_gender)}
-            >
-              <option value="">Select who you&apos;d like to meet</option>
-              {SEEKING_GENDERS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field id="profile-relationship-intent" label="Looking for" optional>
-            <select
-              id="profile-relationship-intent"
-              value={values.relationship_intent}
-              onChange={(event) =>
-                onChange({ relationship_intent: event.target.value })
-              }
-              className={INPUT_CLASSES}
-            >
-              <option value="">Prefer not to say</option>
-              {RELATIONSHIP_INTENTS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field id="profile-height" label="Height in cm" optional error={errors.height_cm}>
-            <input
-              id="profile-height"
-              type="number"
-              inputMode="numeric"
-              min={100}
-              max={250}
-              step={1}
-              placeholder="170"
-              value={values.height_cm}
-              onChange={(event) => onChange({ height_cm: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.height_cm)}
-            />
-          </Field>
-
-          <Field id="profile-hometown" label="Hometown" optional error={errors.hometown}>
-            <input
-              id="profile-hometown"
-              type="text"
-              autoComplete="off"
-              placeholder="Springfield"
-              maxLength={100}
-              value={values.hometown}
-              onChange={(event) => onChange({ hometown: event.target.value })}
-              className={INPUT_CLASSES}
-              aria-invalid={Boolean(errors.hometown)}
-            />
-          </Field>
-
-          <Field id="profile-bio" label="Bio" error={errors.bio}>
-            <textarea
-              id="profile-bio"
-              rows={4}
-              placeholder="Tell people a little about yourself…"
-              value={values.bio}
-              onChange={(event) => onChange({ bio: event.target.value })}
-              className={`${INPUT_CLASSES} resize-none`}
-              aria-invalid={Boolean(errors.bio)}
-            />
-            <div className="mt-1 flex items-baseline justify-between gap-3">
-              <FieldError message={errors.bio} />
-              <span className="ml-auto shrink-0 text-xs text-muted">
-                {values.bio.trim().length}/500
-              </span>
-            </div>
-          </Field>
+          <AboutFields values={values} errors={errors} onChange={onChange} />
+          <OptionalFields values={values} errors={errors} onChange={onChange} />
         </FormSection>
 
         <FormSection
           title="Why I'm here"
           hint="Pick every reason that applies — this shapes who you meet."
         >
-          <div>
-            <div className="flex flex-wrap gap-2">
-              {MOTIVATION_OPTIONS.map((option) => {
-                const selected = values.motivations.includes(option.value);
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    aria-pressed={selected}
-                    disabled={disabled}
-                    onClick={() => toggleMotivation(option.value)}
-                    className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
-                      selected
-                        ? "border-accent bg-accent text-white shadow-card"
-                        : "border-line bg-background text-ink hover:border-accent/50"
-                    } ${FOCUS_RING}`}
-                  >
-                    {selected && <CheckIcon className="size-3.5" />}
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-            <FieldError message={errors.motivations} />
-          </div>
+          <MotivationsFields values={values} errors={errors} onChange={onChange} />
         </FormSection>
 
         <FormSection title="Your interests">
-          <InterestPicker
+          <InterestsPickerFields
+            values={values}
+            errors={errors}
+            onChange={onChange}
             interests={interests}
             interestsLoading={interestsLoading}
             interestsError={interestsError}
-            selectedIds={values.interest_ids}
-            customNames={values.custom_interest_names}
-            onToggle={toggleInterest}
-            onAddCustom={addCustomInterest}
-            onRemoveCustom={removeCustomInterest}
-            onRetry={onRetryInterests}
+            onRetryInterests={onRetryInterests}
           />
-          <FieldError message={errors.interest_ids} />
-          <FieldError message={errors.custom_interest_names} />
         </FormSection>
       </fieldset>
     </div>

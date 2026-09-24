@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { PhotoManager } from "@/components/photo-manager";
@@ -217,16 +218,28 @@ export function ProfileEditForm() {
   }
 
   return (
-    <section className="pt-14 text-center">
-      <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-accent/15 text-accent">
-        <UserIcon className="size-7" />
-      </div>
-      <h1 className="mt-5 text-3xl font-bold tracking-tight">Edit your profile</h1>
+    <section className="pt-10 text-center">
+      <Link
+        href="/profile"
+        className={`inline-flex items-center gap-1 text-sm font-semibold text-accent transition-colors hover:text-accent/80 ${FOCUS_RING}`}
+      >
+        <BackIcon className="size-4" />
+        View your profile
+      </Link>
+
+      <h1 className="mt-4 text-3xl font-bold tracking-tight">Edit your profile</h1>
       <p className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted">
-        Update your details and keep your profile current.
+        Update your photos and details to keep your profile current.
       </p>
 
-      <form onSubmit={handleSubmit} noValidate className="mt-8">
+      <section
+        aria-label="Your photos"
+        className="mt-8 rounded-card border border-line bg-surface p-5 text-left shadow-card"
+      >
+        <PhotoManager />
+      </section>
+
+      <form onSubmit={handleSubmit} noValidate className="mt-5">
         <ProfileFormFields
           values={values}
           errors={fieldErrors}
@@ -246,7 +259,13 @@ export function ProfileEditForm() {
             aria-live="polite"
             className="mt-3 text-sm font-medium text-emerald-600"
           >
-            Profile saved.
+            Profile saved.{" "}
+            <Link
+              href="/profile"
+              className={`font-semibold text-accent underline-offset-2 hover:underline ${FOCUS_RING}`}
+            >
+              View your profile
+            </Link>
           </p>
         )}
         {submitError && (
@@ -267,31 +286,23 @@ export function ProfileEditForm() {
           {submitting ? "Saving changes…" : "Save changes"}
         </button>
       </form>
-
-      <section
-        aria-label="Your photos"
-        className="mt-10 rounded-card border border-line bg-surface p-5 text-left shadow-card"
-      >
-        <PhotoManager />
-      </section>
     </section>
   );
 }
 
-function UserIcon({ className }: { className?: string }) {
+function BackIcon({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.8}
+      strokeWidth={2}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
       className={className}
     >
-      <circle cx="12" cy="8" r="4" />
-      <path d="M4 21c0-4 3.6-6 8-6s8 2 8 6" />
+      <path d="m15 18-6-6 6-6" />
     </svg>
   );
 }

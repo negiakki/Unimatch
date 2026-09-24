@@ -19,7 +19,7 @@ const NAV_ITEMS = [
   { href: "/discovery", label: "Discover" },
   { href: "/matches", label: "Matches" },
   { href: "/messages", label: "Messages" },
-  { href: "/profile/edit", label: "Profile" },
+  { href: "/profile", label: "Profile" },
 ] as const;
 
 const NAV_LINK_CLASSES = `whitespace-nowrap rounded-xl px-2.5 py-2 text-[13px] font-semibold sm:px-3 sm:text-sm ${FOCUS_RING}`;
