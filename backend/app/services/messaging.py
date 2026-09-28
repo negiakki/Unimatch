@@ -255,7 +255,11 @@ def send_message(
             code="database_insert_failed",
         ) from exc
 
+    # PostgREST returns a single object for a `returns <table>` RPC; the test
+    # fake (and a `returns setof` variant) returns a list. Normalize to a list.
     rows = getattr(response, "data", None) or []
+    if isinstance(rows, dict):
+        rows = [rows]
     if not rows:
         raise ServiceUnavailableError(
             "The message could not be sent. Please try again later.",
