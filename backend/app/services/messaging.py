@@ -20,11 +20,20 @@ Security model (mirrors the dating/discovery slices):
     RLS, so the backend re-implements every rule).
   * Message bodies are trimmed and must be 1..2000 characters (422 outside;
     the database CHECK re-enforces it).
+  * Ephemeral conversations: messages are readable only while the
+    conversation is active (a message was sent within the last 24h; a
+    never-messaged conversation has nothing to expire). Expired
+    conversations surface the same 404 as unauthorized ones — for reads and
+    read-markers. Sending to an expired conversation is the restart path:
+    the atomic RPC deletes its old messages, resets the window, then
+    inserts; the match itself stays intact. Cleanup (pg_cron) deletes
+    expired rows later; the RLS/backend rules stay authoritative meanwhile.
   * Sending runs through one atomic RPC that also increments the recipient's
     unread counter; mark-read zeroes the caller's counter (service role).
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -51,6 +60,13 @@ MESSAGE_BODY_MAX_LENGTH = 2000
 MESSAGES_DEFAULT_LIMIT = 30
 MESSAGES_MAX_LIMIT = 100
 
+# Ephemeral conversations: a conversation expires after 24h without a new
+# message. Inactivity is measured from `matches.last_message_at` (reset by
+# every send); NULL = no messages yet = never active. The same rule is
+# re-enforced here AND in RLS (the service role bypasses RLS, so the backend
+# re-implements every rule); pg_cron cleanup deletes expired rows later.
+CONVERSATION_ACTIVE_WINDOW = timedelta(hours=24)
+
 _MESSAGE_COLUMNS = "id,sender_profile_id,body,created_at"
 
 
@@ -70,7 +86,8 @@ def list_conversations(
 
     Each entry carries the matched profile (the exact MatchCard shape) and
     `unread_count` — how many messages the OTHER side sent since the caller
-    last marked the conversation read.
+    last marked the conversation read. Expired conversations (no message in
+    the last 24h) are excluded — the match stays, the conversation lapses.
     """
     viewer = _get_verified_viewer(supabase, auth_user_id, action="use messaging")
     viewer_id = str(viewer["id"])
@@ -93,6 +110,10 @@ def list_conversations(
             "Conversations are temporarily unavailable.", code="database_unavailable"
         ) from exc
     rows = getattr(response, "data", None) or []
+
+    # Expired conversations (24h without a new message) are not conversations
+    # anymore; the match itself remains and a new send restarts them.
+    rows = [row for row in rows if not _conversation_is_expired(row)]
 
     # A block in either direction hides the conversation from BOTH sides
     # while it stands (rows retained; access restored on unblock).
@@ -168,7 +189,8 @@ def get_messages(
     """
     viewer = _get_verified_viewer(supabase, auth_user_id, action="use messaging")
     viewer_id = str(viewer["id"])
-    _require_active_participant(supabase, viewer_id, match_id)
+    match = _require_active_participant(supabase, viewer_id, match_id)
+    _require_conversation_active(match)
 
     # Decoded outside the DB try-block: a bad cursor is a 422, not a 503.
     keyset_filter = None
@@ -254,7 +276,6 @@ def send_message(
             "The message could not be sent. Please try again later.",
             code="database_insert_failed",
         ) from exc
-
     # PostgREST returns a single object for a `returns <table>` RPC; the test
     # fake (and a `returns setof` variant) returns a list. Normalize to a list.
     rows = getattr(response, "data", None) or []
@@ -283,6 +304,7 @@ def mark_conversation_read(
     viewer = _get_verified_viewer(supabase, auth_user_id, action="use messaging")
     viewer_id = str(viewer["id"])
     match = _require_active_participant(supabase, viewer_id, match_id)
+    _require_conversation_active(match)
     is_a = str(match["user_a_id"]) == viewer_id
 
     try:
@@ -322,7 +344,7 @@ def _require_active_participant(
     try:
         response = (
             supabase.table("matches")
-            .select("id,user_a_id,user_b_id,unmatched_at")
+            .select("id,user_a_id,user_b_id,unmatched_at,last_message_at")
             .eq("id", str(match_id))
             .maybe_single()
             .execute()
@@ -349,6 +371,30 @@ def _require_active_participant(
     if other_id in _active_blocked_ids(supabase, viewer_profile_id):
         raise NotFoundError("Conversation not found.")
     return match
+
+
+def _conversation_is_expired(match: dict[str, Any]) -> bool:
+    """True iff the conversation's 24h window has lapsed.
+
+    `last_message_at is null` = no messages yet = never active.
+    """
+    last_message_at = match.get("last_message_at")
+    if not last_message_at:
+        return False
+    try:
+        last_active = datetime.fromisoformat(str(last_message_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if last_active.tzinfo is None:
+        last_active = last_active.replace(tzinfo=timezone.utc)
+    return last_active < datetime.now(timezone.utc) - timedelta(hours=24)
+
+
+def _require_conversation_active(match: dict[str, Any]) -> None:
+    """404 once the 24h inactivity window lapses — identical non-existence
+    behavior to unauthorized conversations (RLS re-enforces the same rule)."""
+    if _conversation_is_expired(match):
+        raise NotFoundError("Conversation not found.")
 
 
 def _profiles_by_id(supabase: Client, profile_ids: list[str]) -> dict[str, dict[str, Any]]:

@@ -2712,3 +2712,308 @@ test('69 · safety: a block hides the match and messages both ways, restores on 
   ]);
   assert.ok(sent.send_conversation_message);
 });
+
+// ============================================================================
+// Ephemeral conversations slice — 24h inactivity expiry
+// ============================================================================
+
+// Fixtures: fresh verified pair + a third user (unauthorized probe) + a
+// staff member (report-status transitions). Indexes must stay unique across
+// the file (insertVerifiedUserFixture derives storage paths from them).
+let expUserA, expUserB, expUserC, expStaff;
+let expProfileA, expProfileB, expProfileC;
+let expMatchId; // the A<->B conversation under test
+
+test('70 · expiry: schema invariants — column, backfill, partial index', async () => {
+  await actAsService();
+  ({ user: expUserA, profile: expProfileA } = await insertVerifiedUserFixture('expiry-a', 'E1'));
+  ({ user: expUserB, profile: expProfileB } = await insertVerifiedUserFixture('expiry-b', 'E2'));
+  ({ user: expUserC, profile: expProfileC } = await insertVerifiedUserFixture('expiry-c', 'E3'));
+  expStaff = await one(`insert into auth.users (email) values ('expiry-staff@example.test') returning id`);
+  await one(`insert into public.staff_admins (auth_user_id) values ($1) returning auth_user_id`, [expStaff.id]);
+
+  const [smallerAB, largerAB] = [expProfileA.id, expProfileB.id].sort();
+  const match = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id, last_message_at`,
+    [smallerAB, largerAB]
+  );
+  expMatchId = match.id;
+  // A fresh match has NULL last_message_at — never active, nothing expires.
+  assert.equal(match.last_message_at, null);
+
+  // The expiration index exists.
+  const indexes = await rows(`
+    select indexname from pg_indexes
+    where schemaname = 'public' and tablename = 'matches'
+  `);
+  assert.ok(
+    indexes.map((i) => i.indexname).includes('matches_last_message_at_idx'),
+    'expected the last_message_at expiration index'
+  );
+
+  // Backfill convention: messages inserted directly (service role) set the
+  // window only through the send RPC's update — a plain INSERT deliberately
+  // leaves last_message_at unchanged, so verify the RPC resets it (test 73).
+});
+
+test('71 · expiry: messages readable only while last_message_at is within 24h (RLS)', async () => {
+  await actAsService();
+  await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'recent message') returning id`,
+    [expMatchId, expProfileA.id]
+  );
+
+  // Sanity: A is user_a or user_b — resolve both sides for the reads below.
+  const sides = await one(`select user_a_id, user_b_id from public.matches where id = $1`, [expMatchId]);
+  const userOfA = sides.user_a_id === expProfileA.id ? expUserA : expUserB;
+
+  // Active (last_message_at NULL here — never set): readable by participants.
+  await actAs(userOfA.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    1
+  );
+
+  // Age the window past 24h → the message is invisible to its participant…
+  await actAsService();
+  await one(`update public.matches set last_message_at = now() - interval '25 hours' where id = $1 returning 1`, [expMatchId]);
+  await actAs(userOfA.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    0
+  );
+
+  // …while the row survives (RLS hides; cleanup deletes later)…
+  await actAsService();
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    1
+  );
+
+  // …and inside the window (23h) it is readable again.
+  await actAsService();
+  await one(`update public.matches set last_message_at = now() - interval '23 hours' where id = $1 returning 1`, [expMatchId]);
+  await actAs(userOfA.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    1
+  );
+});
+
+test('72 · expiry: unauthorized users still cannot access conversations', async () => {
+  const sides = await one(`select user_a_id, user_b_id from public.matches where id = $1`, [expMatchId]);
+  const userOfA = sides.user_a_id === expProfileA.id ? expUserA : expUserB;
+
+  // Nonparticipant sees nothing whether the conversation is active or not.
+  await actAs(expUserC.id);
+  assert.equal((await rows(`select id from public.messages`)).length, 0);
+  await actAsService();
+  await one(`update public.matches set last_message_at = now() where id = $1 returning 1`, [expMatchId]);
+  await actAs(expUserC.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    0
+  );
+  await actAs(userOfA.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    1
+  );
+});
+
+test('73 · expiry: sending resets last_message_at and ticks only the recipient counter', async () => {
+  await actAsService();
+  const sides = await one(`select user_a_id, user_b_id from public.matches where id = $1`, [expMatchId]);
+  const senderProfile = expProfileA;
+  const recipientProfile = expProfileB;
+  const senderIsA = sides.user_a_id === expProfileA.id;
+  const senderCol = senderIsA ? 'user_a_unread_count' : 'user_b_unread_count';
+  const recipientCol = senderIsA ? 'user_b_unread_count' : 'user_a_unread_count';
+
+  await one(`update public.matches set last_message_at = now() - interval '25 hours' where id = $1 returning 1`, [expMatchId]);
+  const before = await one(`select last_message_at from public.matches where id = $1`, [expMatchId]);
+
+  const sent = await one(`select * from public.send_conversation_message($1, $2, 'window reset')`, [
+    expMatchId,
+    senderProfile.id,
+  ]);
+  assert.equal(sent.body, 'window reset');
+
+  const after = await one(
+    `select last_message_at, user_a_unread_count, user_b_unread_count
+     from public.matches where id = $1`,
+    [expMatchId]
+  );
+  assert.ok(after.last_message_at.getTime() > before.last_message_at.getTime(), 'window must reset');
+  assert.ok(Math.abs(after.last_message_at.getTime() - sent.created_at.getTime()) < 1000);
+  assert.equal(after[recipientCol], 1);
+  assert.equal(after[senderCol], 0);
+  assert.ok(recipientProfile.id); // sides resolved; no unused-var lint
+});
+
+test('74 · expiry: send-after-expiry deletes old messages first (fresh start)', async () => {
+  await actAsService();
+  // Seed an old message directly and age the conversation past 24h.
+  const old = await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'ancient history') returning id`,
+    [expMatchId, expProfileA.id]
+  );
+  await one(`update public.matches set last_message_at = now() - interval '30 hours' where id = $1 returning 1`, [expMatchId]);
+
+  // The expired message is already invisible (RLS, test 71)…
+  await actAs(expUserB.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    0
+  );
+
+  // …and the restart send deletes it from the database entirely.
+  await actAsService();
+  await one(`select public.send_conversation_message($1, $2, 'fresh start')`, [expMatchId, expProfileA.id]);
+  assert.equal(
+    (await rows(`select id from public.messages where id = $1`, [old.id])).length,
+    0,
+    'expired content must never become visible again'
+  );
+  const history = await rows(
+    `select body from public.messages where match_id = $1 order by created_at`,
+    [expMatchId]
+  );
+  // The restart wipes the whole expired conversation — only the new message
+  // remains; old content can never reappear.
+  assert.deepEqual(history.map((r) => r.body), ['fresh start']);
+});
+
+test('75 · expiry: cleanup deletes expired messages and zeroes counters (OPEN reports survive)', async () => {
+  await actAsService();
+  // Age the conversation fully past the cleanup window (48h).
+  await one(`update public.matches set last_message_at = now() - interval '49 hours' where id = $1 returning 1`, [expMatchId]);
+  await rows(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'reported content'), ($1, $2, 'ordinary expired')`,
+    [expMatchId, expProfileB.id]
+  );
+  // An OPEN report pins one of the messages.
+  const reported = await one(
+    `select id from public.messages where body = 'reported content'`
+  );
+  await one(
+    `insert into public.reports (reporter_profile_id, reported_profile_id, reason, content_type, content_id)
+     values ($1, $2, 'harassment', 'message', $3) returning id`,
+    [expProfileA.id, expProfileB.id, reported.id]
+  );
+  await one(`update public.matches set user_a_unread_count = 3, user_b_unread_count = 5 where id = $1 returning 1`, [expMatchId]);
+
+  const cleaned = await one(`select public.expire_stale_conversations() as n`);
+  assert.ok(cleaned.n >= 1, 'the expired conversation must be cleaned');
+
+  // Ordinary expired messages are gone; the OPEN-reported message survives…
+  const remaining = await rows(`select body from public.messages where match_id = $1`, [expMatchId]);
+  assert.deepEqual(remaining.map((r) => r.body), ['reported content']);
+  // …and the counters are NOT zeroed while a pinned message remains
+  // (staff context preserved; unmatch semantics untouched).
+  const counters = await one(
+    `select user_a_unread_count, user_b_unread_count from public.matches where id = $1`,
+    [expMatchId]
+  );
+  assert.equal(counters.user_a_unread_count, 3);
+  assert.equal(counters.user_b_unread_count, 5);
+
+  // The reported message is still invisible to ordinary users (expired)…
+  await actAs(expUserB.id);
+  assert.equal(
+    (await rows(`select id from public.messages where match_id = $1`, [expMatchId])).length,
+    0
+  );
+
+  // …but staff reach it through the service role (reports are admin-only).
+  await actAsService();
+  assert.equal((await rows(`select id from public.messages where id = $1`, [reported.id])).length, 1);
+
+  // Close the report → cleanup may remove it and then zero the counters.
+  await one(`update public.reports set status = 'DISMISSED' where content_id = $1 returning 1`, [reported.id]);
+  const cleanedAgain = await one(`select public.expire_stale_conversations() as n`);
+  assert.ok(cleanedAgain.n >= 1);
+  assert.equal((await rows(`select id from public.messages where id = $1`, [reported.id])).length, 0);
+  const countersAfter = await one(
+    `select user_a_unread_count, user_b_unread_count from public.matches where id = $1`,
+    [expMatchId]
+  );
+  assert.equal(countersAfter.user_a_unread_count, 0);
+  assert.equal(countersAfter.user_b_unread_count, 0);
+});
+
+test('76 · expiry: cleanup honors the >24h grace (fresh conversations untouched)', async () => {
+  await actAsService();
+  // A conversation whose last message is 30h old (expired for reads, but not
+  // yet past the 48h cleanup window) keeps its rows.
+  const [smaller, larger] = [expProfileB.id, expProfileC.id].sort();
+  const match = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smaller, larger]
+  );
+  const keep = await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'not yet cleaned') returning id`,
+    [match.id, expProfileB.id]
+  );
+  await one(`update public.matches set last_message_at = now() - interval '30 hours' where id = $1 returning 1`, [match.id]);
+
+  await one(`select public.expire_stale_conversations()`);
+  assert.equal((await rows(`select id from public.messages where id = $1`, [keep.id])).length, 1);
+
+  // The send RPC works on the expired-but-uncleaned conversation and resets it.
+  await one(`select public.send_conversation_message($1, $2, 'revived')`, [match.id, expProfileB.id]);
+  const sides = await one(`select user_a_id, user_b_id from public.matches where id = $1`, [match.id]);
+  const userOfB = sides.user_a_id === expProfileB.id ? expUserB : expUserC;
+  await actAs(userOfB.id);
+  const visible = await rows(`select body from public.messages where match_id = $1 order by created_at`, [match.id]);
+  assert.deepEqual(visible.map((r) => r.body), ['revived']);
+});
+
+test('77 · expiry: block and unmatch still take precedence and behave unchanged', async () => {
+  await actAsService();
+  const [smaller, larger] = [expProfileA.id, expProfileC.id].sort();
+  const match = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smaller, larger]
+  );
+  await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'before block') returning id`,
+    [match.id, expProfileA.id]
+  );
+  const sides = await one(`select user_a_id, user_b_id from public.matches where id = $1`, [match.id]);
+  const userOfA = sides.user_a_id === expProfileA.id ? expUserA : expUserC;
+
+  // Unmatched: invisible regardless of window; unmatch semantics untouched.
+  await one(`update public.matches set unmatched_at = now() where id = $1 returning 1`, [match.id]);
+  await actAs(userOfA.id);
+  assert.equal((await rows(`select id from public.messages where match_id = $1`, [match.id])).length, 0);
+  await actAsService();
+  await expectFailure(
+    () =>
+      rows(`select public.send_conversation_message($1, $2, 'after unmatch')`, [match.id, expProfileA.id]),
+    'not an active participant'
+  );
+
+  // Re-activate, then block: same silence in both directions.
+  await one(`update public.matches set unmatched_at = null where id = $1 returning 1`, [match.id]);
+  const sides2 = await one(`select user_a_id, user_b_id from public.matches where id = $1`, [match.id]);
+  const [profileOfA, profileOfC] =
+    sides2.user_a_id === expProfileA.id ? [expProfileA, expProfileC] : [expProfileC, expProfileA];
+  const [userOfA2, userOfC2] =
+    sides2.user_a_id === expProfileA.id ? [expUserA, expUserC] : [expUserC, expUserA];
+  await one(
+    `insert into public.blocks (blocker_profile_id, blocked_profile_id) values ($1, $2) returning id`,
+    [profileOfA.id, profileOfC.id]
+  );
+  await actAs(userOfA2.id);
+  assert.equal((await rows(`select id from public.messages where match_id = $1`, [match.id])).length, 0);
+  await actAs(userOfC2.id);
+  assert.equal((await rows(`select id from public.messages where match_id = $1`, [match.id])).length, 0);
+  await actAsService();
+  await one(`delete from public.blocks where blocker_profile_id = $1 returning 1`, [profileOfA.id]);
+});

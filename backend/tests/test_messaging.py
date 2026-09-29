@@ -16,6 +16,7 @@ backend uses (including the send_conversation_message RPC). These are NOT
 Supabase integration tests and never touch a network.
 """
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -272,7 +273,8 @@ class FakeSignedUrlBucket:
 
 class FakeRpc:
     """The send_conversation_message RPC: participant + active-match check,
-    insert, and an atomic recipient-counter increment."""
+    expired-conversation reset (delete old messages, zero stale counters),
+    insert, recipient-counter increment, and the last_message_at reset."""
 
     def __init__(self, fake, name, params):
         assert name == "send_conversation_message"
@@ -300,15 +302,31 @@ class FakeRpc:
         ):
             raise RuntimeError("sender is not an active participant of this match")
 
+        # Mirror the RPC's expiry reset: an expired conversation starts
+        # fresh — old messages are deleted (never reappear), stale counters
+        # are zeroed.
+        if _rpc_conversation_expired(match):
+            OPEN_PINNED = fake.state.get("open_reported_message_ids", set())
+            fake.tables["messages"] = [
+                m
+                for m in fake.tables["messages"]
+                if m["match_id"] != match_id or m["id"] in OPEN_PINNED
+            ]
+            match["user_a_unread_count"] = 0
+            match["user_b_unread_count"] = 0
+
         fake.state["msg_seq"] += 1
         message = {
             "id": str(uuid4()),
             "match_id": match_id,
             "sender_profile_id": sender,
             "body": body,
-            "created_at": f"2026-08-30T10:00:00.{fake.state['msg_seq'] * 1000:06d}+00:00",
+            "created_at": _rpc_now_iso(fake.state),
         }
         fake.tables["messages"].append(message)
+
+        # The window resets to the new message.
+        match["last_message_at"] = message["created_at"]
 
         recipient = (
             str(match["user_b_id"])
@@ -320,6 +338,21 @@ class FakeRpc:
         else:
             match["user_b_unread_count"] += 1
         return FakeResponse([dict(message)])
+
+
+def _rpc_now_iso(state) -> str:
+    """Clock for the RPC double: real now, strictly increasing per send."""
+    now = datetime.now(timezone.utc) + timedelta(seconds=state["msg_seq"])
+    return now.isoformat()
+
+
+def _rpc_conversation_expired(match) -> bool:
+    """Same 24h rule as the backend/RLS: NULL = never active."""
+    last = match.get("last_message_at")
+    if not last:
+        return False
+    last_active = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+    return last_active < datetime.now(timezone.utc) - timedelta(hours=24)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +422,8 @@ def match_row(match_id, user_a, user_b, created_at="2026-08-30T10:00:00+00:00"):
         "unmatched_at": None,
         "user_a_unread_count": 0,
         "user_b_unread_count": 0,
+        # No messages yet = never active = nothing to expire (NULL).
+        "last_message_at": None,
     }
 
 
@@ -873,3 +908,110 @@ def test_database_failure_on_history_is_503(client, fake):
     fake._fail_tables.add("messages")
     assert list_messages(client).status_code == 503
     assert fake.tables["messages"] == []
+
+
+# ---------------------------------------------------------------------------
+# 8. Ephemeral conversations — 24h inactivity expiry.
+# ---------------------------------------------------------------------------
+
+
+def _expire(fake, *, hours=25):
+    """Age the conversation past the 24h window."""
+    fake.tables["matches"][0]["last_message_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=hours)
+    ).isoformat()
+
+
+def test_conversation_without_messages_is_active(client):
+    # last_message_at is NULL (never messaged): nothing to expire.
+    assert list_messages(client).status_code == 200
+    assert client.get(CONVERSATIONS_API, headers=AUTH_HEADERS).status_code == 200
+
+
+def test_active_conversation_is_readable(client, fake):
+    assert send(client, "fresh").status_code == 201
+    fake.tables["matches"][0]["last_message_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=23)
+    ).isoformat()
+    resp = list_messages(client)
+    assert resp.status_code == 200
+    assert [m["body"] for m in resp.json()["messages"]] == ["fresh"]
+
+
+def test_conversation_expires_after_24_hours(client, fake):
+    assert send(client, "yesterday").status_code == 201
+    _expire(fake)
+    # Expired conversations surface the same 404 non-existence behavior as
+    # unauthorized/unknown conversations.
+    resp = list_messages(client)
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+    assert mark_read(client).status_code == 404
+
+
+def test_expired_conversation_is_absent_from_conversation_list(client, fake):
+    assert send(client, "gone soon").status_code == 201
+    assert len(client.get(CONVERSATIONS_API, headers=AUTH_HEADERS).json()["conversations"]) == 1
+    _expire(fake)
+    assert client.get(CONVERSATIONS_API, headers=AUTH_HEADERS).json()["conversations"] == []
+    # The match itself is untouched — expiry is a messaging concept only.
+    assert fake.tables["matches"][0]["unmatched_at"] is None
+
+
+def test_send_after_expiry_starts_fresh_and_never_restores_old_messages(client, fake):
+    assert send(client, "old world").status_code == 201
+    old_message_id = fake.tables["messages"][0]["id"]
+    _expire(fake)
+
+    resp = send(client, "fresh start")
+    assert resp.status_code == 201
+    # Old content was deleted by the restart path — it can never reappear.
+    assert [m["id"] for m in fake.tables["messages"]] != [old_message_id]
+    assert all(m["body"] != "old world" for m in fake.tables["messages"])
+    page = list_messages(client).json()
+    assert [m["body"] for m in page["messages"]] == ["fresh start"]
+
+
+def test_new_message_resets_last_message_at(client, fake):
+    _expire(fake)
+    before = fake.tables["matches"][0]["last_message_at"]
+    assert send(client, "reset the window").status_code == 201
+    after = fake.tables["matches"][0]["last_message_at"]
+    assert after != before
+    # The new timestamp is inside the active window → readable again.
+    assert list_messages(client).status_code == 200
+    # One further hour does not expire it; a full day without activity does.
+    fake.tables["matches"][0]["last_message_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=23)
+    ).isoformat()
+    assert list_messages(client).status_code == 200
+
+
+def test_unread_counters_restart_after_expiry_reset(client, fake):
+    # Stale counters from the expired round are zeroed by the reset.
+    fake.tables["matches"][0]["user_a_unread_count"] = 4
+    fake.tables["matches"][0]["user_b_unread_count"] = 2
+    _expire(fake)
+    assert send(client, "restart", headers=PARTNER_HEADERS).status_code == 201
+    match = fake.tables["matches"][0]
+    assert match["user_a_unread_count"] == 1  # viewer's counter ticks only
+    assert match["user_b_unread_count"] == 0
+
+
+def test_expiry_preserves_block_and_unmatch_semantics(client, fake):
+    # A blocked (or unmatched) conversation is 404 regardless of expiry;
+    # expiry must not change those rules.
+    assert send(client, "hi").status_code == 201
+    _expire(fake)
+    fake.tables["blocks"].append(
+        {
+            "id": str(uuid4()),
+            "blocker_profile_id": str(PARTNER_PROFILE_ID),
+            "blocked_profile_id": str(VIEWER_PROFILE_ID),
+        }
+    )
+    assert list_messages(client).status_code == 404
+    assert send(client, "hi again").status_code == 404
+    # Unblock: expiry (not the block) keeps it inaccessible.
+    fake.tables["blocks"].clear()
+    assert list_messages(client).status_code == 404
