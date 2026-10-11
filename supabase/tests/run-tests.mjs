@@ -159,6 +159,30 @@ const university = await one(`
 const interestA = await one(`insert into public.interests (name) values ('Fixture Interest A') returning id`);
 const interestB = await one(`insert into public.interests (name) values ('Fixture Interest B') returning id`);
 
+// --- contextual-matching fixtures ------------------------------------------
+// A category + activity (fixture names/slugs are unique vs the seed data) and
+// a helper to create PUBLISHED opportunities used by the opportunity,
+// application, dating/matching and safety tests.
+const catFixture = await one(`
+  insert into public.categories (name, slug, icon, sort_order)
+  values ('Fixture Category', 'fixture-category', null, 0) returning id
+`);
+const actFixture = await one(
+  `insert into public.activities (category_id, name, slug, sort_order)
+   values ($1, 'Fixture Activity', 'fixture-activity', 0) returning id`,
+  [catFixture.id]
+);
+async function insertPublishedOpportunity(title) {
+  return one(
+    `insert into public.opportunities
+       (title, category_id, activity_id, description, opportunity_date, status)
+     values ($1, $2, $3, 'fixture description', now()::date, 'PUBLISHED')
+     returning id`,
+    [title, catFixture.id, actFixture.id]
+  );
+}
+const oppId = (await insertPublishedOpportunity('Fixture Event')).id;
+
 const userA = await one(`insert into auth.users (email) values ('a@example.test') returning id`);
 const userB = await one(`insert into auth.users (email) values ('b@example.test') returning id`);
 const userC = await one(`insert into auth.users (email) values ('c@example.test') returning id`);
@@ -204,7 +228,10 @@ let submissionV2; // V's resubmission (PENDING -> VERIFIED)
 // Tests
 // ============================================================================
 
-test('01 · migrations create exactly the fourteen expected tables on a clean database', async () => {
+test('01 · migrations create exactly the expected tables on a clean database', async () => {
+  // information_schema only lists tables the current role has privileges on;
+  // service role sees everything (suspensions grants are admin-only).
+  await actAsService();
   const t = await rows(`
     select table_name from information_schema.tables
     where table_schema = 'public' and table_type = 'BASE TABLE'
@@ -212,17 +239,22 @@ test('01 · migrations create exactly the fourteen expected tables on a clean da
   assert.deepEqual(
     t.map((r) => r.table_name).sort(),
     [
+      'activities',
+      'applications',
       'blocks',
+      'categories',
       'custom_interests',
       'dating_actions',
       'interests',
       'matches',
       'messages',
+      'opportunities',
       'profile_interests',
       'profile_photos',
       'profiles',
       'reports',
       'staff_admins',
+      'suspensions',
       'universities',
       'verification_reviews',
       'verification_submissions',
@@ -236,7 +268,7 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'r'
   `);
-  assert.equal(tables.length, 14);
+  assert.equal(tables.length, 19);
   for (const t of tables) {
     assert.equal(t.relrowsecurity, true, `${t.relname} must have RLS enabled`);
   }
@@ -248,6 +280,11 @@ test('02 · RLS is enabled on every table and policies exist', async () => {
   const byTable = Object.fromEntries(policies.map((p) => [p.tablename, p.n]));
   assert.equal(byTable['universities'], 1);
   assert.equal(byTable['interests'], 1);
+  assert.equal(byTable['categories'], 1); // read_all
+  assert.equal(byTable['activities'], 1); // read_all
+  assert.equal(byTable['opportunities'], 1); // select_published
+  assert.equal(byTable['applications'], 3); // select_own + insert_own + update_own
+  assert.equal(byTable['suspensions'], undefined); // admin-only (no user policies)
   assert.equal(byTable['profiles'], 5); // 4 owner + profiles_select_verified
   assert.equal(byTable['profile_interests'], 5); // 4 owner + _select_verified
   assert.equal(byTable['profile_photos'], 5); // 4 owner + _select_verified
@@ -759,13 +796,31 @@ test('17 · seed file applies cleanly and is idempotent', async () => {
   await exec(seedSql);
   const uniCount = (await rows(`select count(*)::int as n from public.universities`))[0].n;
   const interestCount = (await rows(`select count(*)::int as n from public.interests`))[0].n;
-  assert.ok(uniCount >= 6, `expected at least 6 seeded universities, got ${uniCount}`);
+  assert.ok(uniCount >= 4, `expected at least 4 seeded universities, got ${uniCount}`);
   assert.ok(interestCount >= 18, `expected at least 18 seeded interests, got ${interestCount}`);
 
   // Second run must not duplicate anything.
   await exec(seedSql);
   assert.equal((await rows(`select count(*)::int as n from public.universities`))[0].n, uniCount);
   assert.equal((await rows(`select count(*)::int as n from public.interests`))[0].n, interestCount);
+});
+
+test('84 · the seeded university catalog is exactly the four curated V1 institutions', async () => {
+  await actAsService();
+  const names = (await rows(`select name from public.universities order by name`)).map((r) => r.name);
+  const CURATED = [
+    'DIT University',
+    'Doon University',
+    'Graphic Era University',
+    'UPES',
+  ];
+  for (const name of CURATED) {
+    assert.ok(names.includes(name), `missing curated university ${name} in ${JSON.stringify(names)}`);
+  }
+  // The fictional pre-V1 catalog must be gone from seed data.
+  for (const fictional of ['Aldercrest University', 'Rivermoor State University', 'Lindenfeld Technical University']) {
+    assert.ok(!names.includes(fictional), `fictional university ${fictional} is still present`);
+  }
 });
 
 // ============================================================================
@@ -1689,9 +1744,9 @@ test('43 · dating: verified viewer can record an action for their own profile',
 
   await actAs(likeUserA.id);
   const action = await one(
-    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-     values ($1, $2, 'LIKE') returning id, action_type, created_at`,
-    [likeProfileA.id, likeProfileB.id]
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id, action_type, created_at`,
+    [likeProfileA.id, likeProfileB.id, oppId]
   );
   assert.equal(action.action_type, 'LIKE');
   assert.ok(action.created_at instanceof Date);
@@ -1707,36 +1762,46 @@ test('44 · dating: self-actions are rejected by the CHECK constraint', async ()
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $1, 'LIKE')`,
-        [likeProfileA.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $1, 'LIKE', $2)`,
+        [likeProfileA.id, oppId]
       ),
     'dating_actions_no_self_action'
   );
 });
 
-test('45 · dating: exactly one action per actor/target pair (LIKE after PASS included)', async () => {
+test('45 · dating: exactly one action per actor/target/opportunity; the pair may act in different opportunities', async () => {
   await actAs(likeUserA.id);
-  // Duplicate LIKE…
+  // Duplicate LIKE on the SAME opportunity…
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'LIKE')`,
-        [likeProfileA.id, likeProfileB.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'LIKE', $3)`,
+        [likeProfileA.id, likeProfileB.id, oppId]
       ),
-    'dating_actions_actor_target_unique'
+    'dating_actions_actor_target_opportunity_unique'
   );
-  // …PASS on the same pair is the same unique slot — also rejected.
+  // …PASS on the same pair + opportunity is the same unique slot — rejected.
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'PASS')`,
-        [likeProfileA.id, likeProfileB.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'PASS', $3)`,
+        [likeProfileA.id, likeProfileB.id, oppId]
       ),
-    'dating_actions_actor_target_unique'
+    'dating_actions_actor_target_opportunity_unique'
   );
+  // The SAME pair may act independently through a DIFFERENT opportunity.
+  await actAsService();
+  const otherOpp = await insertPublishedOpportunity('Fixture Event Two');
+  await actAs(likeUserA.id);
+  const second = await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [likeProfileA.id, likeProfileB.id, otherOpp.id]
+  );
+  assert.ok(second.id);
 });
 
 test('46 · dating: action_type is restricted to LIKE/PASS', async () => {
@@ -1744,9 +1809,9 @@ test('46 · dating: action_type is restricted to LIKE/PASS', async () => {
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'MAYBE')`,
-        [likeProfileA.id, likeProfileB.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'MAYBE', $3)`,
+        [likeProfileA.id, likeProfileB.id, oppId]
       ),
     'dating_actions_action_type_check'
   );
@@ -1759,9 +1824,9 @@ test('47 · dating: a client cannot spoof the actor (actor_profile_id must be th
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'LIKE')`,
-        [likeProfileA.id, likeProfileB.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'LIKE', $3)`,
+        [likeProfileA.id, likeProfileB.id, oppId]
       ),
     'row-level security'
   );
@@ -1769,7 +1834,7 @@ test('47 · dating: a client cannot spoof the actor (actor_profile_id must be th
   await actAsService();
   assert.equal(
     (await rows(`select 1 from public.dating_actions where actor_profile_id = $1`, [likeProfileA.id])).length,
-    1 // only likeUserA's genuine action from test 43
+    2 // likeUserA's genuine actions from test 43 + the second-opportunity action in test 45
   );
 });
 
@@ -1778,9 +1843,9 @@ test('48 · dating: an unverified viewer cannot record actions', async () => {
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'LIKE')`,
-        [profileW.id, likeProfileA.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'LIKE', $3)`,
+        [profileW.id, likeProfileA.id, oppId]
       ),
     'row-level security'
   );
@@ -1791,9 +1856,9 @@ test('49 · dating: an unverified target cannot be acted on', async () => {
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'LIKE')`,
-        [likeProfileA.id, discProfilePending.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'LIKE', $3)`,
+        [likeProfileA.id, discProfilePending.id, oppId]
       ),
     'row-level security'
   );
@@ -1805,9 +1870,9 @@ test('50 · dating: anonymous clients have no access to dating_actions', async (
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'LIKE')`,
-        [likeProfileA.id, likeProfileB.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'LIKE', $3)`,
+        [likeProfileA.id, likeProfileB.id, oppId]
       ),
     'permission denied'
   );
@@ -1817,9 +1882,9 @@ test('51 · dating: incoming actions are never visible (no "who liked you")', as
   // likeUserB records their own action on likeProfileA.
   await actAs(likeUserB.id);
   await one(
-    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-     values ($1, $2, 'LIKE') returning id`,
-    [likeProfileB.id, likeProfileA.id]
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [likeProfileB.id, likeProfileA.id, oppId]
   );
 
   // likeUserA cannot see the incoming LIKE targeting them…
@@ -1828,10 +1893,10 @@ test('51 · dating: incoming actions are never visible (no "who liked you")', as
     (await rows(`select 1 from public.dating_actions where actor_profile_id = $1`, [likeProfileB.id])).length,
     0
   );
-  // …only their own outgoing action.
+  // …only their own outgoing actions.
   const mine = await rows(`select actor_profile_id from public.dating_actions`);
-  assert.equal(mine.length, 1);
-  assert.equal(mine[0].actor_profile_id, likeProfileA.id);
+  assert.equal(mine.length, 2); // two own opportunities from test 43/45
+  assert.ok(mine.every((m) => m.actor_profile_id === likeProfileA.id));
 });
 
 test('52 · dating: actions are immutable for normal users (no UPDATE/DELETE grant)', async () => {
@@ -1846,15 +1911,15 @@ test('52 · dating: actions are immutable for normal users (no UPDATE/DELETE gra
   );
 });
 
-test('53 · matches: canonical pair ordering, uniqueness, no self-match, server-only writes', async () => {
+test('53 · matches: canonical pair ordering, per-opportunity uniqueness, no self-match, server-only writes', async () => {
   // Normal users hold no INSERT grant — matches are created only by the
   // backend's service-role atomic operation.
   await actAs(likeUserA.id);
   await expectFailure(
     () =>
       rows(
-        `insert into public.matches (user_a_id, user_b_id) values ($1, $2)`,
-        [likeProfileA.id, likeProfileB.id]
+        `insert into public.matches (user_a_id, user_b_id, opportunity_id) values ($1, $2, $3)`,
+        [likeProfileA.id, likeProfileB.id, oppId]
       ),
     'permission denied'
   );
@@ -1865,38 +1930,49 @@ test('53 · matches: canonical pair ordering, uniqueness, no self-match, server-
   await expectFailure(
     () =>
       rows(
-        `insert into public.matches (user_a_id, user_b_id) values ($1, $2)`,
-        [larger, smaller]
+        `insert into public.matches (user_a_id, user_b_id, opportunity_id) values ($1, $2, $3)`,
+        [larger, smaller, oppId]
       ),
     'matches_canonical_pair_order'
   );
   // A profile cannot match itself.
   await expectFailure(
-    () => rows(`insert into public.matches (user_a_id, user_b_id) values ($1, $1)`, [likeProfileA.id]),
+    () => rows(`insert into public.matches (user_a_id, user_b_id, opportunity_id) values ($1, $1, $2)`, [likeProfileA.id, oppId]),
     'matches_canonical_pair_order'
   );
   // The canonical insert succeeds…
   const match = await one(
-    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id, created_at`,
-    [smaller, larger]
+    `insert into public.matches (user_a_id, user_b_id, opportunity_id) values ($1, $2, $3) returning id, created_at`,
+    [smaller, larger, oppId]
   );
   matchId = match.id;
-  // …and the pair is unique — a second row for the same pair is impossible.
+  // …and the (pair, opportunity) is unique — a second row for the same pair
+  // and opportunity is impossible.
   await expectFailure(
     () =>
       rows(
-        `insert into public.matches (user_a_id, user_b_id) values ($1, $2)`,
-        [smaller, larger]
+        `insert into public.matches (user_a_id, user_b_id, opportunity_id) values ($1, $2, $3)`,
+        [smaller, larger, oppId]
       ),
-    'matches_pair_unique'
+    'matches_pair_opportunity_unique'
   );
+  // …but the SAME pair may match independently through another opportunity.
+  const otherOpp = await insertPublishedOpportunity('Fixture Event Three');
+  const secondMatch = await one(
+    `insert into public.matches (user_a_id, user_b_id, opportunity_id) values ($1, $2, $3) returning id`,
+    [smaller, larger, otherOpp.id]
+  );
+  assert.ok(secondMatch.id);
+  // Remove the second contextual match so the participant-visibility test
+  // below sees exactly the one active match.
+  await one(`delete from public.matches where id = $1 returning 1`, [secondMatch.id]);
   // unmatched_at cannot precede created_at.
   await expectFailure(
     () =>
       rows(
-        `insert into public.matches (user_a_id, user_b_id, created_at, unmatched_at)
-         values ($1, $2, now(), now() - interval '1 hour')`,
-        [smaller, larger]
+        `insert into public.matches (user_a_id, user_b_id, opportunity_id, created_at, unmatched_at)
+         values ($1, $2, $3, now(), now() - interval '1 hour')`,
+        [smaller, larger, oppId]
       ),
     'matches_unmatch_after_creation'
   );
@@ -1930,15 +2006,15 @@ test('55 · matches: deleting a profile cascades its actions and matches away', 
   // profileCasc acts on likeProfileA and matches with them (canonical insert).
   await actAs(userCasc.id);
   await one(
-    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-     values ($1, $2, 'LIKE') returning id`,
-    [profileCasc.id, likeProfileA.id]
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [profileCasc.id, likeProfileA.id, oppId]
   );
   await actAsService();
   const [smaller, larger] = [profileCasc.id, likeProfileA.id].sort();
   await one(
-    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
-    [smaller, larger]
+    `insert into public.matches (user_a_id, user_b_id, opportunity_id) values ($1, $2, $3) returning id`,
+    [smaller, larger, oppId]
   );
 
   // Deleting the auth identity cascades profile → actions + matches.
@@ -1971,8 +2047,8 @@ test('56 · dating: secondary indexes exist for both action directions', async (
     'expected an index on target_profile_id'
   );
   assert.ok(
-    names.includes('dating_actions_actor_target_unique'),
-    'expected the unique (actor, target) index'
+    names.includes('dating_actions_actor_target_opportunity_unique'),
+    'expected the unique (actor, target, opportunity) index'
   );
 });
 
@@ -2663,9 +2739,9 @@ test('69 · safety: a block hides the match and messages both ways, restores on 
   await expectFailure(
     () =>
       rows(
-        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-         values ($1, $2, 'LIKE')`,
-        [profileOfB.id, profileOfC.id]
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'LIKE', $3)`,
+        [profileOfB.id, profileOfC.id, oppId]
       ),
     'row-level security'
   );
@@ -2700,9 +2776,9 @@ test('69 · safety: a block hides the match and messages both ways, restores on 
   // Actions can cross again once unblocked…
   await actAs(userOfB.id);
   await one(
-    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type)
-     values ($1, $2, 'LIKE') returning id`,
-    [profileOfB.id, profileOfC.id]
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [profileOfB.id, profileOfC.id, oppId]
   );
   // …and the send RPC works again.
   await actAsService();
@@ -3016,4 +3092,471 @@ test('77 · expiry: block and unmatch still take precedence and behave unchanged
   assert.equal((await rows(`select id from public.messages where match_id = $1`, [match.id])).length, 0);
   await actAsService();
   await one(`delete from public.blocks where blocker_profile_id = $1 returning 1`, [profileOfA.id]);
+});
+
+// ============================================================================
+// Phase 1 (pivot) — categories/activities, opportunities, applications,
+// contextual matching, suspensions, report context
+// ============================================================================
+
+test('78 · categories/activities: readable by all, admin-writable only (RLS + grants)', async () => {
+  // Seeded reference data is present (seed.sql applied after migrations).
+  const cats = await rows(`select name from public.categories order by sort_order`);
+  assert.ok(cats.some((c) => c.name === 'Sports'));
+  assert.ok(cats.some((c) => c.name === 'Travel'));
+
+  // anon can read the catalogs.
+  await actAs(null);
+  const anonCats = await rows(`select name from public.categories`);
+  assert.ok(anonCats.length >= 6, 'seeded + fixture categories are readable');
+  assert.ok(anonCats.some((c) => c.name === 'Sports'));
+  assert.ok(anonCats.some((c) => c.name === 'Fixture Category'));
+  assert.ok((await rows(`select 1 from public.activities`)).length >= 33);
+
+  // authenticated can read too, but cannot modify the catalogs.
+  await actAs(userA.id);
+  assert.ok((await rows(`select 1 from public.categories`)).length >= 6);
+  await expectFailure(
+    () => rows(`insert into public.categories (name, slug) values ('Hacked', 'hacked')`),
+    'permission denied'
+  );
+  await expectFailure(() => rows(`update public.categories set name = 'Hacked'`), 'permission denied');
+  await expectFailure(() => rows(`delete from public.categories`), 'permission denied');
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.activities (category_id, name, slug) values ($1, 'Hacked', 'hacked')`,
+        [catFixture.id]
+      ),
+    'permission denied'
+  );
+
+  // Case-insensitive uniqueness on category name/slug.
+  await actAsService();
+  await expectFailure(
+    () => rows(`insert into public.categories (name, slug) values ('sports', 'another')`),
+    'duplicate key'
+  );
+  await expectFailure(
+    () => rows(`insert into public.categories (name, slug) values ('Another', 'SPORTS')`),
+    'duplicate key'
+  );
+});
+
+test('79 · opportunities: only PUBLISHED is public; users have no write path', async () => {
+  await actAsService();
+  const draft = await one(
+    `insert into public.opportunities
+       (title, category_id, activity_id, description, status)
+     values ('Draft Event', $1, $2, 'fixture', 'DRAFT') returning id`,
+    [catFixture.id, actFixture.id]
+  );
+  const paused = await one(
+    `insert into public.opportunities
+       (title, category_id, activity_id, description, status)
+     values ('Paused Event', $1, $2, 'fixture', 'PAUSED') returning id`,
+    [catFixture.id, actFixture.id]
+  );
+
+  // Normal users (and anon) see only PUBLISHED opportunities.
+  await actAs(userA.id);
+  const visible = await rows(`select title from public.opportunities`);
+  assert.ok(visible.some((o) => o.title === 'Fixture Event'), 'published must be visible');
+  assert.ok(visible.every((o) => o.title !== 'Draft Event' && o.title !== 'Paused Event'));
+
+  // No user write path — opportunity management is service role / admin only.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.opportunities (title, category_id, description, status)
+         values ('Hacked', $1, 'x', 'PUBLISHED')`,
+        [catFixture.id]
+      ),
+    'permission denied'
+  );
+  await expectFailure(
+    () => rows(`update public.opportunities set status = 'CANCELLED'`),
+    'permission denied'
+  );
+  await expectFailure(() => rows(`delete from public.opportunities`), 'permission denied');
+
+  // Status CHECK and title rules hold.
+  await actAsService();
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.opportunities
+           (title, category_id, activity_id, description, status)
+         values ('Bad Status', $1, $2, 'fixture', 'PUBLIC')`,
+        [catFixture.id, actFixture.id]
+      ),
+    'opportunities_status_valid'
+  );
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.opportunities (title, category_id, description, status) values ('', $1, 'x', 'DRAFT')`,
+        [catFixture.id]
+      ),
+    'opportunities_title_valid'
+  );
+});
+
+test('80 · applications: apply with own verified profile; duplicates blocked; withdraw is a status change', async () => {
+  await actAsService();
+  const { user: appUser, profile: appProfile } = await insertVerifiedUserFixture('applications-a', 'X1');
+  const opp = await insertPublishedOpportunity('Application Event');
+
+  // Owner applies — the existing profile is referenced, not duplicated.
+  await actAs(appUser.id);
+  const app = await one(
+    `insert into public.applications (opportunity_id, profile_id) values ($1, $2) returning id, status`,
+    [opp.id, appProfile.id]
+  );
+  assert.equal(app.status, 'APPLIED');
+
+  // Duplicate application for the same user + opportunity is impossible.
+  await expectFailure(
+    () =>
+      rows(`insert into public.applications (opportunity_id, profile_id) values ($1, $2)`, [
+        opp.id,
+        appProfile.id,
+      ]),
+    'applications_opportunity_profile_key'
+  );
+
+  // Owner can read their own applications.
+  assert.equal((await rows(`select id from public.applications where profile_id = $1`, [appProfile.id])).length, 1);
+
+  // Non-owner cannot read/insert.
+  await actAs(userW.id);
+  assert.equal((await rows(`select 1 from public.applications`)).length, 0);
+  await expectFailure(
+    () =>
+      rows(`insert into public.applications (opportunity_id, profile_id) values ($1, $2)`, [
+        opp.id,
+        appProfile.id,
+      ]),
+    'row-level security'
+  );
+
+  // Owner can withdraw (status transition) and re-apply by updating back.
+  await actAs(appUser.id);
+  await one(`update public.applications set status = 'WITHDRAWN' where id = $1 returning 1`, [app.id]);
+  const withdrawn = await one(`select status from public.applications where id = $1`, [app.id]);
+  assert.equal(withdrawn.status, 'WITHDRAWN');
+  await one(`update public.applications set status = 'APPLIED' where id = $1 returning 1`, [app.id]);
+
+  // Unverified users cannot apply.
+  await actAs(userW.id);
+  await expectFailure(
+    () => rows(`insert into public.applications (opportunity_id, profile_id) values ($1, $2)`, [opp.id, profileW.id]),
+    'row-level security'
+  );
+
+  // Applying to a non-PUBLISHED opportunity is blocked by RLS.
+  await actAsService();
+  const draftOpp = await one(
+    `insert into public.opportunities (title, category_id, description, status)
+     values ('Draft For Apps', $1, 'fixture', 'DRAFT') returning id`,
+    [catFixture.id]
+  );
+  await actAs(appUser.id);
+  await expectFailure(
+    () =>
+      rows(`insert into public.applications (opportunity_id, profile_id) values ($1, $2)`, [
+        draftOpp.id,
+        appProfile.id,
+      ]),
+    'row-level security'
+  );
+});
+
+test('81 · contextual matching: actions require a PUBLISHED opportunity and the same pair can match in different opportunities', async () => {
+  await actAsService();
+  const draftOpp = await one(
+    `insert into public.opportunities (title, category_id, description, status)
+     values ('Draft For Actions', $1, 'fixture', 'DRAFT') returning id`,
+    [catFixture.id]
+  );
+  const { user: ctxUserA, profile: ctxProfileA } = await insertVerifiedUserFixture('ctx-a', 'CA');
+  const { user: ctxUserB, profile: ctxProfileB } = await insertVerifiedUserFixture('ctx-b', 'CB');
+
+  // Action on a DRAFT opportunity is refused by RLS (not published).
+  await actAs(ctxUserA.id);
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+         values ($1, $2, 'LIKE', $3)`,
+        [ctxProfileA.id, ctxProfileB.id, draftOpp.id]
+      ),
+    'row-level security'
+  );
+
+  // Mutual interest across TWO different published opportunities creates TWO
+  // independent contextual matches.
+  await actAsService();
+  const oppOne = await insertPublishedOpportunity('Contextual One');
+  const oppTwo = await insertPublishedOpportunity('Contextual Two');
+  await actAs(ctxUserA.id);
+  await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [ctxProfileA.id, ctxProfileB.id, oppOne.id]
+  );
+  await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [ctxProfileA.id, ctxProfileB.id, oppTwo.id]
+  );
+  await actAs(ctxUserB.id);
+  await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [ctxProfileB.id, ctxProfileA.id, oppOne.id]
+  );
+  await one(
+    `insert into public.dating_actions (actor_profile_id, target_profile_id, action_type, opportunity_id)
+     values ($1, $2, 'LIKE', $3) returning id`,
+    [ctxProfileB.id, ctxProfileA.id, oppTwo.id]
+  );
+
+  // Matches are created by the backend (no auto-trigger); the database must
+  // allow the same pair to hold TWO independent contextual matches — one per
+  // opportunity — and reject a duplicate within the same opportunity.
+  await actAsService();
+  const [smaller, larger] = [ctxProfileA.id, ctxProfileB.id].sort();
+  const m1 = await one(
+    `insert into public.matches (user_a_id, user_b_id, opportunity_id)
+     values ($1, $2, $3) returning id, opportunity_id`,
+    [smaller, larger, oppOne.id]
+  );
+  const m2 = await one(
+    `insert into public.matches (user_a_id, user_b_id, opportunity_id)
+     values ($1, $2, $3) returning id, opportunity_id`,
+    [smaller, larger, oppTwo.id]
+  );
+  assert.notEqual(m1.opportunity_id, m2.opportunity_id);
+
+  // Duplicate within the same opportunity is rejected by the partial unique
+  // index (the concurrency arbiter for contextual matching).
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.matches (user_a_id, user_b_id, opportunity_id)
+         values ($1, $2, $3)`,
+        [smaller, larger, oppOne.id]
+      ),
+    'matches_pair_opportunity_unique'
+  );
+
+  // Exactly two contextual matches exist for the pair, one per opportunity.
+  const matches = await rows(
+    `select id, opportunity_id from public.matches
+     where user_a_id = $1 and user_b_id = $2
+     order by created_at`,
+    [smaller, larger]
+  );
+  assert.equal(matches.length, 2);
+  assert.deepEqual(new Set(matches.map((m) => m.opportunity_id)), new Set([oppOne.id, oppTwo.id]));
+});
+
+test('82 · suspensions: admin-only storage (no user policies)', async () => {
+  await actAsService();
+  const { user: susUser, profile: susProfile } = await insertVerifiedUserFixture('suspensions-a', 'SU1');
+
+  // Ordinary users (verified or not) hold no grant at all.
+  await actAs(userA.id);
+  await expectFailure(() => rows(`select 1 from public.suspensions`), 'permission denied');
+  await actAs(null);
+  await expectFailure(() => rows(`select 1 from public.suspensions`), 'permission denied');
+
+  // Service role (admin backend) can create a suspension.
+  await actAsService();
+  const suspension = await one(
+    `insert into public.suspensions (profile_id, reason, suspended_until, created_by)
+     values ($1, 'harassment', null, $2) returning id, profile_id`,
+    [susProfile.id, userStaff.id]
+  );
+  assert.equal(suspension.profile_id, susProfile.id);
+
+  // Even the suspended profile cannot read their own suspension row.
+  await actAs(susUser.id);
+  await expectFailure(() => rows(`select 1 from public.suspensions`), 'permission denied');
+
+  // Indefinite vs timed expiry: suspended_until must be later than created_at.
+  await actAsService();
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.suspensions (profile_id, reason, suspended_until, created_by)
+         values ($1, 'bad', now() - interval '1 day', $2)`,
+        [susProfile.id, userStaff.id]
+      ),
+    'suspensions_until_valid'
+  );
+});
+
+test('83 · reports: content_type accepts opportunity (and rejects unknown kinds)', async () => {
+  await actAsService();
+  // An OPEN report may now reference an opportunity.
+  const report = await one(
+    `insert into public.reports
+       (reporter_profile_id, reported_profile_id, reason, content_type, content_id)
+     values ($1, $2, 'inappropriate_content', 'opportunity', $3) returning id, status`,
+    [safeProfileA.id, safeProfileB.id, oppId]
+  );
+  assert.equal(report.status, 'OPEN');
+
+  // Unknown content types are still rejected by the CHECK.
+  await expectFailure(
+    () =>
+      rows(
+        `insert into public.reports
+           (reporter_profile_id, reported_profile_id, reason, content_type, content_id)
+         values ($1, $2, 'other', 'group', $3)`,
+        [safeProfileA.id, safeProfileB.id, oppId]
+      ),
+    'reports_content_type_valid'
+  );
+});
+
+// ============================================================================
+// Custom universities ("My university isn't listed")
+// ============================================================================
+
+const CUSTOM_UNI_USER = await (async () => {
+  await actAsService();
+  const u = await one(`insert into auth.users (email) values ('customuni@example.test') returning id`);
+  await actAsService();
+  return u;
+})();
+
+test('85 · a profile claims exactly one university: catalog row XOR custom name', async () => {
+  // Catalog row only -> accepted.
+  await actAs(CUSTOM_UNI_USER.id);
+  const withCatalog = await one(
+    `insert into public.profiles
+       (auth_user_id, first_name, date_of_birth, university_id, course,
+        academic_year, gender, seeking_gender, bio)
+     values ($1, 'Custom', current_date - interval '21 years', $2,
+             'BSc', 2, 'man', 'everyone', 'Hi')
+     returning id, university_id, custom_university_name`,
+    [CUSTOM_UNI_USER.id, university.id]
+  );
+  assert.ok(withCatalog.university_id, 'catalog university_id should be set');
+  assert.equal(withCatalog.custom_university_name, null, 'catalog claim must leave the custom name NULL');
+
+  // Custom name only -> accepted.
+  await actAsService();
+  const u2 = await one(`insert into auth.users (email) values ('customuni2@example.test') returning id`);
+  await actAs(u2.id);
+  const withCustom = await one(
+    `insert into public.profiles
+       (auth_user_id, first_name, date_of_birth, university_id, custom_university_name,
+        course, academic_year, gender, seeking_gender, bio)
+     values ($1, 'Custom', current_date - interval '21 years', null, 'Forest Research Institute',
+             'BSc', 2, 'man', 'everyone', 'Hi')
+     returning id, university_id, custom_university_name`,
+    [u2.id]
+  );
+  assert.equal(withCustom.university_id, null, 'custom claim must leave university_id NULL');
+  assert.equal(withCustom.custom_university_name, 'Forest Research Institute');
+
+  // Both -> rejected by profiles_university_claimed.
+  await actAsService();
+  const u3 = await one(`insert into auth.users (email) values ('bothuni@example.test') returning id`);
+  await actAs(u3.id);
+  await expectFailure(
+    () =>
+      one(
+        `insert into public.profiles
+           (auth_user_id, first_name, date_of_birth, university_id, custom_university_name,
+            course, academic_year, gender, seeking_gender, bio)
+         values ($1, 'Both', current_date - interval '21 years', $2, 'Forest Research Institute',
+                 'BSc', 2, 'man', 'everyone', 'Hi')
+         returning id`,
+        [u3.id, university.id]
+      ),
+    'profiles_university_claimed'
+  );
+
+  // Neither -> rejected by the same constraint.
+  await actAsService();
+  const u4 = await one(`insert into auth.users (email) values ('nouni@example.test') returning id`);
+  await actAs(u4.id);
+  await expectFailure(
+    () =>
+      one(
+        `insert into public.profiles
+           (auth_user_id, first_name, date_of_birth, university_id, custom_university_name,
+            course, academic_year, gender, seeking_gender, bio)
+         values ($1, 'Neither', current_date - interval '21 years', null, null,
+                 'BSc', 2, 'man', 'everyone', 'Hi')
+         returning id`,
+        [u4.id]
+      ),
+    'profiles_university_claimed'
+  );
+
+  // A custom name never becomes a catalog row.
+  await actAsService();
+  const catalogNames = (await rows(`select name from public.universities`)).map((r) => r.name);
+  assert.ok(!catalogNames.includes('Forest Research Institute'), 'custom university must not create a catalog record');
+});
+
+test('86 · custom university name must be pre-trimmed and length-checked', async () => {
+  // Matches every other text column in this schema (first_name, hometown,
+  // course): the CHECK requires the value to be ALREADY trimmed and the app
+  // layer normalizes before writing. The DB rejects rather than silently
+  // trimming, so a reviewer never sees an untrimmed name.
+  await actAsService();
+  const u = await one(`insert into auth.users (email) values ('trimuni@example.test') returning id`);
+  await actAs(u.id);
+  const trimmed = await one(
+    `insert into public.profiles
+       (auth_user_id, first_name, date_of_birth, university_id, custom_university_name,
+        course, academic_year, gender, seeking_gender, bio)
+     values ($1, 'Trim', current_date - interval '21 years', null, 'Panjab University',
+             'BSc', 2, 'man', 'everyone', 'Hi')
+     returning custom_university_name`,
+    [u.id]
+  );
+  assert.equal(trimmed.custom_university_name, 'Panjab University');
+
+  // Untrimmed input is rejected at the database boundary.
+  await actAsService();
+  const uPad = await one(`insert into auth.users (email) values ('paduni@example.test') returning id`);
+  await actAs(uPad.id);
+  await expectFailure(
+    () =>
+      one(
+        `insert into public.profiles
+           (auth_user_id, first_name, date_of_birth, university_id, custom_university_name,
+            course, academic_year, gender, seeking_gender, bio)
+         values ($1, 'Pad', current_date - interval '21 years', null, '  Panjab University  ',
+                 'BSc', 2, 'man', 'everyone', 'Hi')
+         returning id`,
+        [uPad.id]
+      ),
+    'profiles_custom_university_name_valid'
+  );
+
+  await actAsService();
+  const u2 = await one(`insert into auth.users (email) values ('longuni@example.test') returning id`);
+  await actAs(u2.id);
+  await expectFailure(
+    () =>
+      one(
+        `insert into public.profiles
+           (auth_user_id, first_name, date_of_birth, university_id, custom_university_name,
+            course, academic_year, gender, seeking_gender, bio)
+         values ($1, 'Long', current_date - interval '21 years', null, $2,
+                 'BSc', 2, 'man', 'everyone', 'Hi')
+         returning id`,
+        [u2.id, 'x'.repeat(121)]
+      ),
+    'profiles_custom_university_name_valid'
+  );
 });
