@@ -4,19 +4,22 @@
 -- Applied by the Supabase CLI after migrations (`supabase db reset`) or
 -- manually with psql. Idempotent: safe to run repeatedly.
 --
--- Contains ONLY fictional universities and generic interest labels.
+-- Contains ONLY the curated V1 university catalog and generic interest labels.
 -- No real people, student identities, student ID numbers, profiles, or
 -- verification documents — those are created by the app, never seeded.
+--
+-- V1 curates four institutions. Students whose university is absent pick "My
+-- university isn't listed" and store a free-text custom_university_name
+-- instead; that never creates a catalog row.
 -- ============================================================================
 
 insert into public.universities (name, city, state, country) values
-  ('Aldercrest University',              'Aldercrest',   'California',      'United States'),
-  ('Northgate Institute of Technology',  'Northgate',    'New York',        'United States'),
-  ('Rivermoor State University',         'Rivermoor',    'Ohio',            'United States'),
-  ('University of Avonbridge',           'Avonbridge',   'England',         'United Kingdom'),
-  ('Kestrel Bay University',             'Kestrel Bay',  'New South Wales', 'Australia'),
-  ('Lindenfeld Technical University',    'Lindenfeld',   'Bavaria',         'Germany')
-on conflict do nothing;
+  ('Doon University',         'Dehradun', 'Uttarakhand', 'India'),
+  ('DIT University',          'Dehradun', 'Uttarakhand', 'India'),
+  ('UPES',                    'Dehradun', 'Uttarakhand', 'India'),
+  ('Graphic Era University',  'Dehradun', 'Uttarakhand', 'India')
+on conflict (lower(name), lower(city), lower(coalesce(state, '')), lower(country))
+do nothing;
 
 insert into public.interests (name) values
   ('Hiking'), ('Photography'), ('Cooking'), ('Board Games'), ('Live Music'),
