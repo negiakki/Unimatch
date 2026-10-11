@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.services.supabase import get_supabase_service_client
 
+from tests.fakes import matches_or_filter
+
 API = "/api/v1/discovery/feed"
 
 VIEWER_AUTH_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -74,14 +76,7 @@ class FakeTable:
         return self
 
     def or_(self, expr):
-        # Supports only "col.eq.value,col.eq.value" (the backend's usage):
-        # each comma-separated clause is an independent OR alternative.
-        group = []
-        for part in expr.split(","):
-            column, op, value = part.split(".", 2)
-            assert op == "eq"
-            group.append([(column, value)])
-        self._or_filters.append(group)
+        self._or_filters.append(expr)
         return self
 
     def order(self, column, desc=False):
@@ -100,10 +95,7 @@ class FakeTable:
         def matches_or(row):
             if not self._or_filters:
                 return True
-            return any(
-                any(all(row.get(c) == v for c, v in clause) for clause in group)
-                for group in self._or_filters
-            )
+            return any(matches_or_filter(row, expr) for expr in self._or_filters)
 
         return [
             row

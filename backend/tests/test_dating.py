@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.services.supabase import get_supabase_service_client
 
+from tests.fakes import matches_or_filter
+
 LIKE_API = "/api/v1/discovery/{profile_id}/like"
 PASS_API = "/api/v1/discovery/{profile_id}/pass"
 MATCHES_API = "/api/v1/matches"
@@ -114,14 +116,7 @@ class FakeTable:
         return self
 
     def or_(self, expr):
-        # Supports only "col.eq.value,col.eq.value" (the backend's usage):
-        # each comma-separated clause is an independent OR alternative.
-        group = []
-        for part in expr.split(","):
-            column, op, value = part.split(".", 2)
-            assert op == "eq"
-            group.append([(column, value)])
-        self._or_filters.append(group)
+        self._or_filters.append(expr)
         return self
 
     def order(self, column, desc=False):
@@ -157,8 +152,7 @@ class FakeTable:
         ):
             return False
         if self._or_filters and not any(
-            any(all(row.get(c) == v for c, v in clause) for clause in group)
-            for group in self._or_filters
+            matches_or_filter(row, expr) for expr in self._or_filters
         ):
             return False
         return True

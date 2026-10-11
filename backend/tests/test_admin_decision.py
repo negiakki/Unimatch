@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.services.supabase import get_supabase_service_client
 
+from tests.fakes import matches_or_filter
+
 API = "/api/v1/admin/verifications"
 
 STAFF_AUTH_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -53,6 +55,7 @@ class FakeTable:
         self._fail = table_name in fail_tables
         self._state = state
         self._filters: dict = {}
+        self._or_filters: list = []
         self._single = False
         self._update_data = None
 
@@ -67,14 +70,25 @@ class FakeTable:
         self._filters[column] = value
         return self
 
+    def or_(self, expr):
+        # Used by the shared suspension gate, which runs on admin routes too.
+        self._or_filters.append(expr)
+        return self
+
     def maybe_single(self):
         self._single = True
         return self
 
     def _matches(self, row):
-        return all(
+        if not all(
             row.get(column) == value for column, value in self._filters.items()
-        )
+        ):
+            return False
+        if self._or_filters and not any(
+            matches_or_filter(row, expr) for expr in self._or_filters
+        ):
+            return False
+        return True
 
     def execute(self):
         if self._fail:
