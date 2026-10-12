@@ -1,40 +1,37 @@
 /**
- * API client for the profile endpoints.
+ * Profile endpoints — ONE universal UniMatch profile reused across every
+ * opportunity.
  *
- * GET  /api/v1/profiles/me — the caller's own profile.
- * POST /api/v1/profiles/me — create it (one profile per account).
- * PUT  /api/v1/profiles/me — update the editable fields.
- * GET  /api/v1/universities — read-only catalog for the profile forms.
+ * GET  /api/v1/profiles/me - the caller's own profile.
+ * POST /api/v1/profiles/me - create it (one profile per account).
+ * PUT  /api/v1/profiles/me - update the editable fields.
+ * GET  /api/v1/universities - read-only catalog for the profile forms.
  *
- * Authentication uses the existing Supabase browser session; the JWT is
- * attached as a bearer token and validated by FastAPI. Ownership is derived
- * server-side from the token — this client never sends auth_user_id, profile
- * ids, or any ownership field, and the backend never returns them.
+ * Ownership is derived server-side from the session token: this client never
+ * sends auth_user_id, profile ids, or any ownership field.
  *
- * Backend failures arrive as `{ "error": { "code": "...", "message": "..." } }`.
- * Raw backend messages are never surfaced to users — errors are mapped to
- * concise, curated copy by code.
+ * A legacy dating-era column (`relationship_intent`) still exists in the
+ * database and the backend contract. V1 has no relationship intent, so the UI
+ * neither asks for it nor renders it; the value round-trips untouched on update
+ * instead of being silently rewritten.
  */
 
-import { apiBaseUrl } from "@/lib/env";
-import { createClient } from "@/lib/supabase/client";
+import { ApiError, requestJson } from "@/lib/api/http";
 
 export type ProfileGender = "woman" | "man" | "non_binary" | "other";
-export type ProfileSeekingGender = "women" | "men" | "everyone";
-export type ProfileRelationshipIntent =
-  | "casual"
-  | "serious"
-  | "friendship"
-  | "not_sure";
 
-/** "Why I'm here" — controlled values mirroring the backend/DB enum set. */
+/** Partner-discovery preference: who the user would like to discover. */
+export type ProfileSeekingGender = "women" | "men" | "everyone";
+
+/** "Why I'm here" - controlled values mirroring the backend/DB enum set. */
 export type ProfileMotivation =
   | "dating"
   | "making_friends"
   | "confidence_and_communication";
 
+/** Labels are presentation only; the wire values never change. */
 export const MOTIVATION_OPTIONS: { value: ProfileMotivation; label: string }[] = [
-  { value: "dating", label: "Dating" },
+  { value: "dating", label: "Meeting new people" },
   { value: "making_friends", label: "Making friends" },
   {
     value: "confidence_and_communication",
@@ -42,7 +39,7 @@ export const MOTIVATION_OPTIONS: { value: ProfileMotivation; label: string }[] =
   },
 ];
 
-/** Max interests per profile — combined catalog + custom budget (PRD). */
+/** Max interests per profile - combined catalog + custom budget. */
 export const MAX_COMBINED_INTERESTS = 8;
 
 /** Custom interest name limit — mirrors the database constraint. */
@@ -67,13 +64,17 @@ export interface Profile {
   id: string;
   first_name: string;
   date_of_birth: string;
-  university_id: string;
+  /** Catalog row id, or null when the student named an unlisted university. */
+  university_id: string | null;
+  /** The student's own university name, used when university_id is null. */
+  custom_university_name: string | null;
   course: string;
   academic_year: number;
   gender: ProfileGender;
   seeking_gender: ProfileSeekingGender;
   bio: string;
-  relationship_intent: ProfileRelationshipIntent | null;
+  /** Legacy dating-era column. Never rendered in V1; round-tripped as-is. */
+  relationship_intent: string | null;
   height_cm: number | null;
   hometown: string | null;
   motivations: ProfileMotivation[];
@@ -89,13 +90,16 @@ export interface Profile {
 export interface ProfileInput {
   first_name: string;
   date_of_birth: string;
-  university_id: string;
+  /** Exactly one of university_id / custom_university_name is non-null. */
+  university_id: string | null;
+  custom_university_name: string | null;
   course: string;
   academic_year: number;
   gender: ProfileGender;
   seeking_gender: ProfileSeekingGender;
   bio: string;
-  relationship_intent: ProfileRelationshipIntent | null;
+  /** Carried through untouched; V1 has no control for it. */
+  relationship_intent: string | null;
   height_cm: number | null;
   hometown: string | null;
   motivations: ProfileMotivation[];
@@ -109,12 +113,16 @@ export interface ProfileInput {
 export interface ProfileFormValues {
   first_name: string;
   date_of_birth: string;
+  /** Catalog id, or CUSTOM_UNIVERSITY_ID when "isn't listed" is chosen. */
   university_id: string;
+  /** Required exactly when university_id is CUSTOM_UNIVERSITY_ID. */
+  custom_university_name: string;
   course: string;
   academic_year: string;
   gender: string;
   seeking_gender: string;
   bio: string;
+  /** Not editable in V1 — present only to round-trip the legacy column. */
   relationship_intent: string;
   height_cm: string;
   hometown: string;
@@ -129,6 +137,7 @@ export type ProfileFieldKey =
   | "first_name"
   | "date_of_birth"
   | "university_id"
+  | "custom_university_name"
   | "course"
   | "academic_year"
   | "gender"
@@ -142,36 +151,25 @@ export type ProfileFieldKey =
 
 export type ProfileFieldErrors = Partial<Record<ProfileFieldKey, string>>;
 
-export type ProfileApiErrorCode =
-  | "unauthorized"
-  | "not_found"
-  | "already_exists"
-  | "validation"
-  | "unavailable"
-  | "network"
-  | "unknown";
+/**
+ * Sentinel `university_id` for the "My university isn't listed" option. V1
+ * curates a short catalog, so this is a form-only value — it is never sent to
+ * the API. Choosing it means `university_id: null` plus a
+ * `custom_university_name`, which never creates a catalog row.
+ */
+export const CUSTOM_UNIVERSITY_ID = "__custom__";
 
-const USER_MESSAGES: Record<ProfileApiErrorCode, string> = {
+/** Mirrors the backend's MAX_CUSTOM_UNIVERSITY_NAME_LENGTH. */
+export const MAX_CUSTOM_UNIVERSITY_NAME_LENGTH = 120;
+
+const MESSAGES = {
   unauthorized: "You need to sign in to manage your profile.",
   not_found: "We couldn't find your profile.",
-  already_exists: "A profile already exists for this account.",
+  conflict: "A profile already exists for this account.",
   validation: "Some profile details aren't valid. Please review and try again.",
   unavailable:
     "Your profile is temporarily unavailable. Please try again in a moment.",
-  network:
-    "We couldn't reach the server. Check your connection and try again.",
-  unknown: "Something went wrong. Please try again.",
-};
-
-export class ProfileApiError extends Error {
-  readonly code: ProfileApiErrorCode;
-
-  constructor(code: ProfileApiErrorCode) {
-    super(USER_MESSAGES[code]);
-    this.name = "ProfileApiError";
-    this.code = code;
-  }
-}
+} as const;
 
 // ---------------------------------------------------------------------------
 // UX-only validation. The backend re-validates authoritatively (mirroring the
@@ -217,8 +215,18 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFieldErro
     errors.date_of_birth = "You must be at least 18 years old to use UniMatch.";
   }
 
+  // Exactly one university must be claimed: a catalog pick, or a typed name.
+  const usesCustomUniversity = values.university_id === CUSTOM_UNIVERSITY_ID;
   if (!values.university_id) {
     errors.university_id = "Select your university.";
+  } else if (usesCustomUniversity) {
+    const custom = values.custom_university_name.trim();
+    if (!custom) {
+      errors.custom_university_name = "Enter your university's name.";
+    } else if (custom.length > MAX_CUSTOM_UNIVERSITY_NAME_LENGTH) {
+      errors.custom_university_name =
+        `Your university's name must be ${MAX_CUSTOM_UNIVERSITY_NAME_LENGTH} characters or fewer.`;
+    }
   }
 
   const course = values.course.trim();
@@ -286,19 +294,21 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFieldErro
 
 export function profileInputFromForm(values: ProfileFormValues): ProfileInput {
   const heightRaw = values.height_cm.trim();
+  const usesCustomUniversity = values.university_id === CUSTOM_UNIVERSITY_ID;
   return {
     first_name: values.first_name.trim(),
     date_of_birth: values.date_of_birth,
-    university_id: values.university_id,
+    // Exactly one — the sentinel is a form detail, never sent.
+    university_id: usesCustomUniversity ? null : values.university_id,
+    custom_university_name: usesCustomUniversity
+      ? values.custom_university_name.trim()
+      : null,
     course: values.course.trim(),
     academic_year: Number(values.academic_year),
     gender: values.gender as ProfileGender,
     seeking_gender: values.seeking_gender as ProfileSeekingGender,
     bio: values.bio.trim(),
-    relationship_intent:
-      values.relationship_intent === ""
-        ? null
-        : (values.relationship_intent as ProfileRelationshipIntent),
+    relationship_intent: values.relationship_intent || null,
     height_cm: heightRaw === "" ? null : Number(heightRaw),
     hometown: values.hometown.trim() === "" ? null : values.hometown.trim(),
     motivations: values.motivations as ProfileMotivation[],
@@ -313,7 +323,11 @@ export function profileFormValuesFromProfile(profile: Profile): ProfileFormValue
   return {
     first_name: profile.first_name,
     date_of_birth: profile.date_of_birth,
-    university_id: profile.university_id,
+    // A custom-university profile round-trips back into the sentinel so the
+    // "isn't listed" branch and its text field re-open on edit.
+    university_id:
+      profile.university_id ?? CUSTOM_UNIVERSITY_ID,
+    custom_university_name: profile.custom_university_name ?? "",
     course: profile.course,
     academic_year: String(profile.academic_year),
     gender: profile.gender,
@@ -337,115 +351,30 @@ export function profileFormValuesFromProfile(profile: Profile): ProfileFormValue
 // ---------------------------------------------------------------------------
 
 export async function fetchUniversities(): Promise<University[]> {
-  return requestJson<University[]>("/api/v1/universities", { method: "GET" });
+  return (
+    (await requestJson<University[]>("/api/v1/universities", { method: "GET" })) ?? []
+  );
 }
 
 export async function fetchMyProfile(): Promise<Profile> {
-  return requestJson<Profile>("/api/v1/profiles/me", { method: "GET" });
+  return requestJson<Profile>("/api/v1/profiles/me", { method: "GET" }, MESSAGES);
 }
 
 export async function createMyProfile(input: ProfileInput): Promise<Profile> {
-  return requestJson<Profile>("/api/v1/profiles/me", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  return requestJson<Profile>(
+    "/api/v1/profiles/me",
+    { method: "POST", body: JSON.stringify(input) },
+    MESSAGES,
+  );
 }
 
 export async function updateMyProfile(input: ProfileInput): Promise<Profile> {
-  return requestJson<Profile>("/api/v1/profiles/me", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  return requestJson<Profile>(
+    "/api/v1/profiles/me",
+    { method: "PUT", body: JSON.stringify(input) },
+    MESSAGES,
+  );
 }
 
-/**
- * Resolves the Supabase access token from the existing browser session.
- * No second auth mechanism is introduced; missing/expired sessions surface
- * as an unauthorized error and the backend re-validates every token.
- */
-async function getAccessToken(): Promise<string | null> {
-  const supabase = createClient();
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? null;
-}
+export { ApiError };
 
-async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
-  const token = await getAccessToken();
-  if (!token) {
-    throw new ProfileApiError("unauthorized");
-  }
-
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-
-  let response: Response;
-  try {
-    response = await fetch(`${apiBaseUrl()}${path}`, { ...init, headers });
-  } catch {
-    throw new ProfileApiError("network");
-  }
-
-  if (!response.ok) {
-    throw new ProfileApiError(
-      errorCodeFor(await readBackendErrorCode(response), response.status),
-    );
-  }
-
-  try {
-    return (await response.json()) as T;
-  } catch {
-    throw new ProfileApiError("unknown");
-  }
-}
-
-async function readBackendErrorCode(
-  response: Response,
-): Promise<string | undefined> {
-  try {
-    const body = (await response.json()) as {
-      error?: { code?: unknown };
-    };
-    return typeof body?.error?.code === "string" ? body.error.code : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function errorCodeFor(
-  backendCode: string | undefined,
-  status: number,
-): ProfileApiErrorCode {
-  switch (backendCode) {
-    case "unauthorized":
-      return "unauthorized";
-    case "profile_not_found":
-      return "not_found";
-    case "profile_already_exists":
-      return "already_exists";
-    case "validation_error":
-      return "validation";
-    case "database_unavailable":
-    case "database_insert_failed":
-    case "database_update_failed":
-      return "unavailable";
-    default:
-      if (status === 401 || status === 403) {
-        return "unauthorized";
-      }
-      if (status === 404) {
-        return "not_found";
-      }
-      if (status === 409) {
-        return "already_exists";
-      }
-      if (status === 422) {
-        return "validation";
-      }
-      if (status >= 500) {
-        return "unavailable";
-      }
-      return "unknown";
-  }
-}

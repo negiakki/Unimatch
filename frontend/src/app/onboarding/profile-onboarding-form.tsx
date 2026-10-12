@@ -11,18 +11,16 @@ import {
   InterestsPickerFields,
   MotivationsFields,
   OptionalFields,
-  RELATIONSHIP_INTENTS,
   SEEKING_GENDERS,
   StudiesFields,
 } from "@/components/profile-form-fields";
+import { Button } from "@/components/ui";
+import { Label } from "@/components/ui";
+import { ApiError } from "@/lib/api/http";
+import { fetchInterests, type Interest } from "@/lib/api/interests";
 import {
-  fetchInterests,
-  InterestsApiError,
-  type Interest,
-} from "@/lib/api/interests";
-import {
+  CUSTOM_UNIVERSITY_ID,
   MOTIVATION_OPTIONS,
-  ProfileApiError,
   createMyProfile,
   fetchMyProfile,
   fetchUniversities,
@@ -34,6 +32,7 @@ import {
   type ProfileFormValues,
   type University,
 } from "@/lib/api/profile";
+import { cx } from "@/lib/format";
 
 /**
  * Profile creation as a multi-step wizard for a signed-in user who doesn't
@@ -50,6 +49,7 @@ const EMPTY_VALUES: ProfileFormValues = {
   first_name: "",
   date_of_birth: "",
   university_id: "",
+  custom_university_name: "",
   course: "",
   academic_year: "",
   gender: "",
@@ -66,7 +66,7 @@ const EMPTY_VALUES: ProfileFormValues = {
 /** Field keys each step is responsible for — errors are filtered to these. */
 const STEP_FIELD_KEYS: Record<StepKey, ProfileFieldKey[]> = {
   basics: ["first_name", "date_of_birth", "gender", "seeking_gender"],
-  studies: ["university_id", "course", "academic_year"],
+  studies: ["university_id", "custom_university_name", "course", "academic_year"],
   about: ["bio"],
   interests: ["motivations", "interest_ids", "custom_interest_names"],
   photos: [],
@@ -75,25 +75,21 @@ const STEP_FIELD_KEYS: Record<StepKey, ProfileFieldKey[]> = {
 };
 
 const STEPS = [
-  { key: "basics", title: "The basics", blurb: "First things first — your name, birthday, and who you're hoping to meet." },
+  { key: "basics", title: "The basics", blurb: "Your name, birthday, and who you'd like to meet." },
   { key: "studies", title: "Your studies", blurb: "Your university is matched against your student ID during verification." },
-  { key: "about", title: "About you", blurb: "A short bio is the first thing people read after your photos." },
-  { key: "interests", title: "Interests & motivations", blurb: "Pick what you're here for and the things you love." },
-  { key: "photos", title: "Your photos", blurb: "Photos are the first thing other students see. Add at least one — you can always change them later." },
+  { key: "about", title: "About you", blurb: "A short bio is what people read after your photo." },
+  { key: "interests", title: "Interests & motives", blurb: "Pick what you're here for and the things you love." },
+  { key: "photos", title: "Your photos", blurb: "Your photo is the first thing other students see. Add at least one." },
   { key: "optional", title: "Optional details", blurb: "Every field here is optional — skip anything you'd rather not share." },
-  { key: "review", title: "Review your profile", blurb: "Check everything looks right. You can go back and edit any section." },
+  { key: "review", title: "Review your profile", blurb: "Check it looks right. You can go back and edit any section." },
 ] as const;
 
 type StepKey = (typeof STEPS)[number]["key"];
 
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
 function messageFor(error: unknown): string {
-  if (error instanceof ProfileApiError || error instanceof InterestsApiError) {
-    return error.message;
-  }
-  return "Something went wrong. Please try again.";
+  return error instanceof ApiError
+    ? error.message
+    : "Something went wrong. Please try again.";
 }
 
 export function ProfileOnboardingForm() {
@@ -115,6 +111,8 @@ export function ProfileOnboardingForm() {
   const [saving, setSaving] = useState(false);
   /** Flips after the profile is created; later saves go through PUT. */
   const [profileCreated, setProfileCreated] = useState(false);
+  /** Owned by PhotoManager; onboarding needs it to require at least one photo. */
+  const [photoCount, setPhotoCount] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
 
   const loadUniversities = useCallback(async () => {
@@ -158,7 +156,7 @@ export function ProfileOnboardingForm() {
         router.replace("/verify");
         return;
       } catch (error) {
-        if (error instanceof ProfileApiError) {
+        if (error instanceof ApiError) {
           if (error.code === "not_found") {
             await Promise.all([loadUniversities(), loadInterests()]);
             setPhase("ready");
@@ -203,8 +201,9 @@ export function ProfileOnboardingForm() {
   }
 
   function handleRedirect(error: unknown): boolean {
-    if (error instanceof ProfileApiError) {
-      if (error.code === "already_exists") {
+    if (error instanceof ApiError) {
+      // The profile already exists (created in another tab) — continue.
+      if (error.code === "conflict") {
         router.replace("/verify");
         return true;
       }
@@ -257,6 +256,14 @@ export function ProfileOnboardingForm() {
       return;
     }
 
+    // A profile photo is required: it is the first thing other students see,
+    // and discovery is worthless without one. Gated here so the photos step
+    // cannot be skipped past, and re-checked on finish.
+    if (step === "photos" && photoCount === 0) {
+      setSubmitError("Add at least one photo before continuing.");
+      return;
+    }
+
     goToStep(stepIndex + 1);
   }
 
@@ -275,6 +282,13 @@ export function ProfileOnboardingForm() {
       if (firstStep >= 0) {
         goToStep(firstStep);
       }
+      return;
+    }
+    // Defensive: the photos step already blocks this, but finish is also
+    // reachable via the review step's jump-back buttons.
+    if (photoCount === 0) {
+      setSubmitError("Add at least one photo before continuing.");
+      goToStep(STEPS.findIndex((step) => step.key === "photos"));
       return;
     }
     if (!profileCreated) {
@@ -300,36 +314,24 @@ export function ProfileOnboardingForm() {
     return (
       <section className="pt-14" aria-busy="true" aria-live="polite">
         <span className="sr-only">Preparing your profile</span>
-        <div className="mx-auto size-14 animate-pulse rounded-2xl bg-line" />
-        <div className="mx-auto mt-5 h-8 w-56 animate-pulse rounded-full bg-line" />
-        <div className="mx-auto mt-3 h-4 w-72 max-w-full animate-pulse rounded-full bg-line" />
-        <div className="mt-8 h-96 rounded-card border border-line bg-surface shadow-card" />
+        <div className="h-3 w-32 animate-pulse bg-line" />
+        <div className="mt-8 h-10 w-56 animate-pulse bg-line" />
+        <div className="mt-10 h-64 animate-pulse bg-line" />
       </section>
     );
   }
 
   if (phase === "error") {
     return (
-      <section className="pt-14 text-center">
-        <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-accent/15 text-accent">
-          <AlertIcon className="size-7" />
-        </div>
-        <h1 className="mt-5 text-3xl font-bold tracking-tight">
-          Something went wrong
-        </h1>
-        <p
-          role="alert"
-          className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted"
-        >
+      <section className="pt-14">
+        <Label>Problem</Label>
+        <h1 className="type-display mt-4 text-display">Something went wrong</h1>
+        <p role="alert" className="mt-4 max-w-sm text-[15px] leading-relaxed text-muted">
           {loadError}
         </p>
-        <button
-          type="button"
-          onClick={retryLoad}
-          className={`mt-8 w-full rounded-2xl border border-line bg-surface py-3.5 font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-        >
+        <Button variant="outline" className="mt-8 w-full" onClick={retryLoad}>
           Try again
-        </button>
+        </Button>
       </section>
     );
   }
@@ -339,16 +341,16 @@ export function ProfileOnboardingForm() {
   const fieldGroupProps = { values, errors: fieldErrors, onChange: handleChange };
 
   return (
-    <section className="pt-14">
+    <section className="pt-12">
       <OnboardingProgress
         steps={STEPS.map(({ title }) => title)}
         currentStep={stepIndex}
         onStepClick={goToStep}
       />
 
-      <div className="mt-8 text-center">
-        <h1 className="text-3xl font-bold tracking-tight">{step.title}</h1>
-        <p className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted">
+      <div className="mt-10">
+        <h1 className="type-display text-display">{step.title}</h1>
+        <p className="mt-3 max-w-md text-[15px] leading-relaxed text-muted">
           {step.blurb}
         </p>
       </div>
@@ -376,8 +378,8 @@ export function ProfileOnboardingForm() {
       )}
 
       {step.key === "interests" && (
-        <div className="mt-8 space-y-5 text-left">
-          <WizardCard heading="Why I'm here" hint="Pick every reason that applies — this shapes who you meet.">
+        <div className="text-left">
+          <WizardCard heading="Why I'm here" hint="Pick every reason that applies.">
             <MotivationsFields {...fieldGroupProps} />
           </WizardCard>
           <WizardCard heading="Your interests">
@@ -394,7 +396,7 @@ export function ProfileOnboardingForm() {
 
       {step.key === "photos" && (
         <WizardCard>
-          <PhotoManager />
+          <PhotoManager onCountChange={setPhotoCount} />
           <p className="mt-3 text-xs leading-relaxed text-muted">
             You can add or change photos any time from your profile.
           </p>
@@ -408,7 +410,7 @@ export function ProfileOnboardingForm() {
       )}
 
       {isReview && (
-        <div className="mt-8 space-y-3 text-left">
+        <div className="text-left">
           <ReviewRow
             section="Basics"
             stepIndex={0}
@@ -424,7 +426,11 @@ export function ProfileOnboardingForm() {
             stepIndex={1}
             onEdit={goToStep}
             lines={[
-              universitySummary(universities, values.university_id),
+              universitySummary(
+                universities,
+                values.university_id,
+                values.custom_university_name,
+              ),
               [values.course, yearSummary(values.academic_year)]
                 .filter(Boolean)
                 .join(" · "),
@@ -437,7 +443,7 @@ export function ProfileOnboardingForm() {
             lines={[values.bio]}
           />
           <ReviewRow
-            section="Interests & motivations"
+            section="Interests & motives"
             stepIndex={3}
             onEdit={goToStep}
             lines={[
@@ -458,21 +464,24 @@ export function ProfileOnboardingForm() {
             section="Photos"
             stepIndex={4}
             onEdit={goToStep}
-            lines={["Managed in the photos step — reopen it to add or reorder."]}
+            lines={[
+              photoCount > 0
+                ? `${photoCount} added`
+                : "None yet — add at least one to continue",
+            ]}
           />
           <ReviewRow
             section="Optional details"
             stepIndex={5}
             onEdit={goToStep}
             lines={[
-              intentSummary(values),
               [values.height_cm ? `${values.height_cm} cm` : "", values.hometown ? `From ${values.hometown}` : ""]
                 .filter(Boolean)
                 .join(" · "),
             ]}
           />
 
-          <p className="px-1 pt-2 text-center text-xs leading-relaxed text-muted">
+          <p className="px-1 pt-6 text-sm leading-relaxed text-muted">
             Next up: a quick student ID check so everyone on UniMatch is a real
             student.
           </p>
@@ -480,7 +489,7 @@ export function ProfileOnboardingForm() {
       )}
 
       {submitError && (
-        <p role="alert" className="mt-4 text-center text-sm font-medium text-red-600">
+        <p role="alert" className="mt-6 text-sm font-medium text-danger">
           {submitError}
         </p>
       )}
@@ -488,23 +497,24 @@ export function ProfileOnboardingForm() {
         {saving ? "Saving your profile" : ""}
       </p>
 
-      <div className="mt-5 flex items-center gap-3">
+      <div className="mt-8 flex items-center gap-3">
         {stepIndex > 0 && (
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={() => goToStep(stepIndex - 1)}
             disabled={saving}
-            className={`rounded-2xl border border-line bg-surface px-5 py-3.5 font-semibold text-ink shadow-card transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+            className="px-5"
           >
             Back
-          </button>
+          </Button>
         )}
-        <button
+        <Button
           type="button"
           onClick={isReview ? handleFinish : handleNext}
           disabled={saving || (step.key === "studies" && universitiesLoading)}
           aria-busy={saving}
-          className={`flex-1 rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+          className="flex-1"
         >
           {saving
             ? "Saving…"
@@ -513,14 +523,8 @@ export function ProfileOnboardingForm() {
               : stepIndex === STEPS.length - 2
                 ? "Review your profile"
                 : "Next"}
-        </button>
+        </Button>
       </div>
-      {stepIndex === 0 && (
-        <p className="mt-4 text-center text-xs leading-relaxed text-muted">
-          Next up: a quick student ID check so everyone on UniMatch is a real
-          student.
-        </p>
-      )}
     </section>
   );
 }
@@ -533,7 +537,8 @@ function genderSummary(values: ProfileFormValues): string {
   if (!gender && !seeking) {
     return "";
   }
-  return [gender, seeking && `interested in ${seeking.toLowerCase()}`]
+  // Partner-discovery preference, worded neutrally.
+  return [gender, seeking && `discover: ${seeking.toLowerCase()}`]
     .filter(Boolean)
     .join(", ");
 }
@@ -548,20 +553,18 @@ function motivationSummary(values: ProfileFormValues): string {
   return labels.length > 0 ? `Here for: ${labels.join(", ")}` : "";
 }
 
-function intentSummary(values: ProfileFormValues): string {
-  if (!values.relationship_intent) {
-    return "Looking for: prefer not to say";
-  }
-  const label = RELATIONSHIP_INTENTS.find(
-    (option) => option.value === values.relationship_intent,
-  )?.label;
-  return `Looking for: ${label ?? values.relationship_intent}`;
-}
-
+/**
+ * Review-step label for the claimed university. A custom pick has no catalog
+ * row, so fall back to the student's own typed name rather than a blank line.
+ */
 function universitySummary(
   universities: University[],
   universityId: string,
+  customName: string,
 ): string {
+  if (universityId === CUSTOM_UNIVERSITY_ID) {
+    return customName.trim();
+  }
   return universities.find((item) => item.id === universityId)?.name ?? "";
 }
 
@@ -579,22 +582,18 @@ function WizardCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mt-8 rounded-card border border-line bg-surface p-5 text-left shadow-card">
-      {heading && (
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
-          {heading}
-        </h2>
-      )}
-      {hint && <p className="mt-1 text-xs leading-relaxed text-muted">{hint}</p>}
-      <div className={heading ? "mt-4 space-y-4" : "space-y-4"}>{children}</div>
+    <div className="mt-8 border-t border-line pt-6 text-left">
+      {heading && <Label>{heading}</Label>}
+      {hint && <p className="mt-2 text-xs leading-relaxed text-muted">{hint}</p>}
+      <div className={heading ? "mt-5 space-y-4" : "space-y-4"}>{children}</div>
     </div>
   );
 }
 
 /**
- * Progress rail: "Step X of 7" label plus one pill per step — completed
- * steps fill in accent, the current step widens, future steps stay dim.
- * Completed steps are clickable to jump back for editing.
+ * Progress rail: "Step X of 7" plus one segment per step. Completed segments
+ * fill in accent, the current one widens, future ones stay dim and are not
+ * clickable (you can only go back, never skip ahead).
  */
 function OnboardingProgress({
   steps,
@@ -607,11 +606,11 @@ function OnboardingProgress({
 }) {
   return (
     <nav aria-label="Onboarding progress">
-      <div className="flex items-center justify-between">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-          Step {currentStep + 1} of {steps.length}
-        </p>
-        <p className="text-xs text-muted">{steps[currentStep]}</p>
+      <div className="flex items-baseline justify-between gap-3">
+        <Label>
+          Step {currentStep + 1} / {steps.length}
+        </Label>
+        <p className="truncate text-sm text-muted">{steps[currentStep]}</p>
       </div>
       <div className="mt-3 flex gap-1.5">
         {steps.map((title, index) => {
@@ -625,13 +624,14 @@ function OnboardingProgress({
               disabled={index >= currentStep}
               aria-label={`Step ${index + 1}: ${title}${index < currentStep ? " (completed — go back)" : ""}`}
               aria-current={index === currentStep ? "step" : undefined}
-              className={`h-1.5 flex-1 rounded-full transition-all ${FOCUS_RING} ${
+              className={cx(
+                "h-1 flex-1 rounded-full transition-all disabled:pointer-events-none",
                 state === "done"
                   ? "bg-accent"
                   : state === "current"
-                    ? "flex-[2] bg-accent/60"
-                    : "bg-line"
-              }`}
+                    ? "flex-[2] bg-accent/12"
+                    : "bg-line",
+              )}
             />
           );
         })}
@@ -653,48 +653,29 @@ function ReviewRow({
 }) {
   const filled = lines.filter((line) => line && line.trim());
   return (
-    <div className="rounded-card border border-line bg-surface p-4 shadow-card">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold">{section}</h2>
-        <button
-          type="button"
-          onClick={() => onEdit(stepIndex)}
-          aria-label={`Edit ${section}`}
-          className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/10 ${FOCUS_RING}`}
-        >
-          Edit
-        </button>
+    <div className="flex items-start justify-between gap-4 border-b border-line py-4">
+      <div className="min-w-0 flex-1">
+        <Label>{section}</Label>
+        <div className="mt-2 space-y-0.5">
+          {filled.length > 0 ? (
+            filled.map((line, index) => (
+              <p key={index} className="text-sm leading-relaxed text-muted">
+                {line}
+              </p>
+            ))
+          ) : (
+            <p className="text-sm italic text-muted">Nothing added yet.</p>
+          )}
+        </div>
       </div>
-      <div className="mt-1.5 space-y-0.5">
-        {filled.length > 0 ? (
-          filled.map((line, index) => (
-            <p key={index} className="text-sm leading-relaxed text-muted">
-              {line}
-            </p>
-          ))
-        ) : (
-          <p className="text-sm italic text-muted">Nothing added yet.</p>
-        )}
-      </div>
+      <button
+        type="button"
+        onClick={() => onEdit(stepIndex)}
+        aria-label={`Edit ${section}`}
+        className="shrink-0 rounded-full border border-line px-3 py-1 text-xs font-semibold text-ink transition-colors hover:border-ink"
+      >
+        Edit
+      </button>
     </div>
-  );
-}
-
-function AlertIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={className}
-    >
-      <circle cx="12" cy="12" r="10" />
-      <path d="M12 8v4" />
-      <path d="M12 16h.01" />
-    </svg>
   );
 }

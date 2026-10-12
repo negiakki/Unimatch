@@ -1,37 +1,36 @@
 /**
- * API client for conversations & messages (Phase 7).
+ * Conversations & messages.
  *
  * GET  /api/v1/conversations — the caller's conversations (active matches)
- *   with unread counts; each carries the same client-safe profile shape as
- *   the matches list.
- * GET  /api/v1/conversations/{id}/messages — message history, newest first,
- *   keyset-paginated via the opaque `cursor`.
+ *   with unread counts. Each carries the OPPORTUNITY it belongs to, because
+ *   the opportunity is the reason two people are talking.
+ * GET  /api/v1/conversations/{id}/messages — history, newest first, keyset
+ *   paginated via the opaque `cursor`.
  * POST /api/v1/conversations/{id}/messages — send one text message
  *   (1–2000 characters after trimming; the backend trims).
  * POST /api/v1/conversations/{id}/read — mark the conversation read.
  *
- * Authentication uses the existing Supabase browser session; the JWT is
- * attached as a bearer token and validated by FastAPI. Sender identity is
- * derived server-side from the token — this client never sends profile ids.
  * A conversation id IS a match id; an unmatched conversation surfaces as
- * `not_found` everywhere.
- *
- * Backend failures arrive as `{ "error": { "code": "...", "message": "..." } }`.
- * Raw backend messages are never surfaced to users — errors are mapped to
- * concise, curated copy by code.
+ * `not_found` everywhere. Chats are temporary: the backend drops a
+ * conversation after 24 hours without a new message, while the match remains.
  */
 
-import { apiBaseUrl } from "@/lib/env";
-import { createClient } from "@/lib/supabase/client";
-import type { DiscoveryCandidate } from "@/lib/api/discovery";
+import { ApiError, requestJson } from "@/lib/api/http";
+import type { Person } from "@/lib/api/discovery";
+import type { OpportunityContext } from "@/lib/api/opportunities";
 
 export const MAX_MESSAGE_LENGTH = 2000;
 
-export interface ConversationEntry {
+/** Hours a conversation stays open without a new message. */
+export const CHAT_LIFETIME_HOURS = 24;
+
+export interface Conversation {
   id: string;
   created_at: string | null;
   unread_count: number;
-  profile: DiscoveryCandidate;
+  profile: Person;
+  /** Why these two matched — shown as conversation context. */
+  opportunity?: OpportunityContext | null;
 }
 
 export interface ChatMessage {
@@ -47,43 +46,20 @@ export interface MessagePage {
   next_cursor: string | null;
 }
 
-export type MessagingApiErrorCode =
-  | "unauthorized"
-  | "not_verified"
-  | "not_found"
-  | "validation"
-  | "unavailable"
-  | "network"
-  | "unknown";
-
-const USER_MESSAGES: Record<MessagingApiErrorCode, string> = {
-  unauthorized: "You need to sign in to do that.",
-  not_verified: "You need to be verified to use messaging.",
+const MESSAGES = {
+  not_verified: "Verify your student status before messaging.",
   not_found: "This conversation is no longer available.",
   validation: "That message couldn't be sent. Please check it and try again.",
-  unavailable:
-    "Messaging is temporarily unavailable. Please try again in a moment.",
-  network: "We couldn't reach the server. Check your connection and try again.",
-  unknown: "Something went wrong. Please try again.",
-};
+  unavailable: "Messaging is temporarily unavailable. Please try again shortly.",
+} as const;
 
-export class MessagingApiError extends Error {
-  readonly code: MessagingApiErrorCode;
-
-  constructor(code: MessagingApiErrorCode) {
-    super(USER_MESSAGES[code]);
-    this.name = "MessagingApiError";
-    this.code = code;
-  }
-}
-
-export async function fetchConversations(): Promise<{
-  conversations: ConversationEntry[];
-}> {
-  return requestJson<{ conversations: ConversationEntry[] }>(
+export async function fetchConversations(): Promise<Conversation[]> {
+  const page = await requestJson<{ conversations: Conversation[] }>(
     "/api/v1/conversations",
     { method: "GET" },
+    MESSAGES,
   );
+  return page.conversations ?? [];
 }
 
 export async function fetchMessages(
@@ -103,6 +79,7 @@ export async function fetchMessages(
       query ? `?${query}` : ""
     }`,
     { method: "GET" },
+    MESSAGES,
   );
 }
 
@@ -113,6 +90,7 @@ export async function sendMessage(
   return requestJson<ChatMessage>(
     `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
     { method: "POST", body: JSON.stringify({ body }) },
+    MESSAGES,
   );
 }
 
@@ -122,99 +100,8 @@ export async function markConversationRead(
   return requestJson(
     `/api/v1/conversations/${encodeURIComponent(conversationId)}/read`,
     { method: "POST" },
+    MESSAGES,
   );
 }
 
-/**
- * Resolves the Supabase access token from the existing browser session.
- * No second auth mechanism is introduced; missing/expired sessions surface
- * as an unauthorized error and the backend re-validates every token.
- */
-async function getAccessToken(): Promise<string | null> {
-  const supabase = createClient();
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? null;
-}
-
-async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
-  const token = await getAccessToken();
-  if (!token) {
-    throw new MessagingApiError("unauthorized");
-  }
-
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  if (init.body) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(`${apiBaseUrl()}${path}`, { ...init, headers });
-  } catch {
-    throw new MessagingApiError("network");
-  }
-
-  if (!response.ok) {
-    throw new MessagingApiError(
-      errorCodeFor(await readBackendErrorCode(response), response.status),
-    );
-  }
-
-  try {
-    return (await response.json()) as T;
-  } catch {
-    throw new MessagingApiError("unknown");
-  }
-}
-
-async function readBackendErrorCode(
-  response: Response,
-): Promise<string | undefined> {
-  try {
-    const body = (await response.json()) as {
-      error?: { code?: unknown };
-    };
-    return typeof body?.error?.code === "string" ? body.error.code : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function errorCodeFor(
-  backendCode: string | undefined,
-  status: number,
-): MessagingApiErrorCode {
-  switch (backendCode) {
-    case "unauthorized":
-      return "unauthorized";
-    case "permission_denied":
-      return "not_verified";
-    case "not_found":
-      return "not_found";
-    case "validation_error":
-      return "validation";
-    case "database_unavailable":
-    case "database_insert_failed":
-    case "database_update_failed":
-    case "service_unavailable":
-      return "unavailable";
-    default:
-      if (status === 401) {
-        return "unauthorized";
-      }
-      if (status === 403) {
-        return "not_verified";
-      }
-      if (status === 404) {
-        return "not_found";
-      }
-      if (status === 422) {
-        return "validation";
-      }
-      if (status >= 500) {
-        return "unavailable";
-      }
-      return "unknown";
-  }
-}
+export { ApiError };

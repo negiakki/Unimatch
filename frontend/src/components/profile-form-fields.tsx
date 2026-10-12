@@ -2,10 +2,15 @@
 
 import { useState } from "react";
 
+import { cx } from "@/lib/format";
+import { Label } from "@/components/ui";
+
 import type { Interest } from "@/lib/api/interests";
 import {
+  CUSTOM_UNIVERSITY_ID,
   MAX_COMBINED_INTERESTS,
   MAX_CUSTOM_INTEREST_LENGTH,
+  MAX_CUSTOM_UNIVERSITY_NAME_LENGTH,
   MOTIVATION_OPTIONS,
   type ProfileFieldErrors,
   type ProfileFormValues,
@@ -15,18 +20,16 @@ import {
 
 /**
  * Presentational profile fields shared by the /onboarding wizard and the
- * /profile/edit form. Pure UI only — validation rules live in the profile
- * API module (UX checks) and the backend (authoritative).
+ * /profile/edit form. Pure UI — validation rules live in the profile API
+ * module (UX checks) and the backend (authoritative).
  *
- * Fields are exported as small groups (BasicsFields, StudiesFields, …) so
- * the onboarding wizard can show one group per step, while /profile/edit
- * composes every group into one long form via ProfileFormFields.
+ * V1 exposes no relationship-intent control: that column is legacy, so it is
+ * neither asked for nor rendered (it round-trips through the form values
+ * untouched instead).
  */
 
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
-const INPUT_CLASSES = `w-full rounded-2xl border border-line bg-background px-4 py-3.5 text-[15px] text-ink shadow-card placeholder:text-muted/60 focus:border-accent disabled:opacity-40 ${FOCUS_RING}`;
+const INPUT_CLASSES =
+  "w-full border border-line bg-surface px-4 py-3 text-[15px] text-ink placeholder:text-muted/60 focus:border-ink disabled:opacity-40";
 
 // Product scope: UniMatch covers years 1–6 end to end (UI, API, DB).
 const ACADEMIC_YEARS = [1, 2, 3, 4, 5, 6];
@@ -38,25 +41,12 @@ export const GENDERS: { value: string; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
+/** Partner-discovery preference, deliberately not a dating preference. */
 export const SEEKING_GENDERS: { value: string; label: string }[] = [
+  { value: "everyone", label: "Everyone" },
   { value: "women", label: "Women" },
   { value: "men", label: "Men" },
-  { value: "everyone", label: "Everyone" },
 ];
-
-export const RELATIONSHIP_INTENTS: { value: string; label: string }[] = [
-  { value: "casual", label: "Casual" },
-  { value: "serious", label: "Serious relationship" },
-  { value: "friendship", label: "Friendship" },
-  { value: "not_sure", label: "Not sure yet" },
-];
-
-function todayIsoDate(): string {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
-}
 
 function universityLabel(university: University): string {
   const place = [university.city, university.state, university.country]
@@ -75,14 +65,14 @@ function FormSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-card border border-line bg-surface p-5 shadow-card">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
-        {title}
-      </h2>
+    <section className="border-t border-line pt-6">
+      <Label>{title}</Label>
       {hint && (
-        <p className="mt-1 text-xs leading-relaxed text-muted">{hint}</p>
+        <p className="mt-2 max-w-prose text-sm leading-relaxed text-muted">
+          {hint}
+        </p>
       )}
-      <div className="mt-4 space-y-4">{children}</div>
+      <div className="mt-5 space-y-5">{children}</div>
     </section>
   );
 }
@@ -104,11 +94,9 @@ function Field({
     <div>
       <label htmlFor={id} className="block text-sm font-semibold">
         {label}
-        {optional && (
-          <span className="font-normal text-muted"> (optional)</span>
-        )}
+        {optional && <span className="font-normal text-muted"> (optional)</span>}
       </label>
-      <div className="mt-1.5">{children}</div>
+      <div className="mt-2">{children}</div>
       <FieldError message={error} />
     </div>
   );
@@ -126,7 +114,7 @@ export function BasicsFields({
   errors,
   onChange,
 }: ProfileFieldGroupProps) {
-  const maxDate = todayIsoDate();
+  const maxDate = new Date().toISOString().slice(0, 10);
 
   return (
     <>
@@ -175,9 +163,13 @@ export function BasicsFields({
         </select>
       </Field>
 
+      {/*
+        Partner discovery, stated neutrally: this filters WHO turns up in an
+        opportunity's feed. It is not a dating or relationship preference.
+      */}
       <Field
         id="profile-seeking-gender"
-        label="Interested in"
+        label="Who would you like to discover?"
         error={errors.seeking_gender}
       >
         <select
@@ -187,13 +179,17 @@ export function BasicsFields({
           className={INPUT_CLASSES}
           aria-invalid={Boolean(errors.seeking_gender)}
         >
-          <option value="">Select who you&apos;d like to meet</option>
+          <option value="">Select one</option>
           {SEEKING_GENDERS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
         </select>
+        <p className="mt-2 text-xs leading-relaxed text-muted">
+          This decides who you&apos;re shown inside each opportunity&apos;s
+          people feed.
+        </p>
       </Field>
     </>
   );
@@ -209,13 +205,24 @@ export function StudiesFields({
   universities: University[];
   universitiesLoading: boolean;
 }) {
+  const usesCustomUniversity = values.university_id === CUSTOM_UNIVERSITY_ID;
   return (
     <>
       <Field id="profile-university" label="University" error={errors.university_id}>
         <select
           id="profile-university"
           value={values.university_id}
-          onChange={(event) => onChange({ university_id: event.target.value })}
+          onChange={(event) =>
+            // Clearing the typed name when switching back to a catalog pick
+            // keeps the form consistent with the exactly-one API rule.
+            onChange({
+              university_id: event.target.value,
+              custom_university_name:
+                event.target.value === CUSTOM_UNIVERSITY_ID
+                  ? values.custom_university_name
+                  : "",
+            })
+          }
           className={INPUT_CLASSES}
           aria-invalid={Boolean(errors.university_id)}
         >
@@ -229,8 +236,31 @@ export function StudiesFields({
               {universityLabel(university)}
             </option>
           ))}
+          <option value={CUSTOM_UNIVERSITY_ID}>My university isn&apos;t listed</option>
         </select>
       </Field>
+
+      {usesCustomUniversity && (
+        <Field
+          id="profile-custom-university"
+          label="Your university's name"
+          error={errors.custom_university_name}
+        >
+          <input
+            id="profile-custom-university"
+            type="text"
+            autoComplete="off"
+            placeholder="e.g. Forest Research Institute"
+            maxLength={MAX_CUSTOM_UNIVERSITY_NAME_LENGTH}
+            value={values.custom_university_name}
+            onChange={(event) =>
+              onChange({ custom_university_name: event.target.value })
+            }
+            className={INPUT_CLASSES}
+            aria-invalid={Boolean(errors.custom_university_name)}
+          />
+        </Field>
+      )}
 
       <Field id="profile-course" label="Course" error={errors.course}>
         <input
@@ -268,14 +298,14 @@ export function StudiesFields({
 
 export function AboutFields({ values, errors, onChange }: ProfileFieldGroupProps) {
   return (
-    <Field id="profile-bio" label="Bio" error={errors.bio}>
+    <Field id="profile-bio" label="Short bio" error={errors.bio}>
       <textarea
         id="profile-bio"
         rows={4}
-        placeholder="Tell people a little about yourself…"
+        placeholder="What are you usually up to?"
         value={values.bio}
         onChange={(event) => onChange({ bio: event.target.value })}
-        className={`${INPUT_CLASSES} resize-none`}
+        className={cx(INPUT_CLASSES, "resize-none")}
         aria-invalid={Boolean(errors.bio)}
       />
       <div className="mt-1 flex items-baseline justify-between gap-3">
@@ -293,9 +323,8 @@ export function MotivationsFields({
   errors,
   onChange,
 }: ProfileFieldGroupProps) {
-  function toggleMotivation(motivation: ProfileMotivation) {
-    const selected = values.motivations.includes(motivation);
-    const next = selected
+  function toggle(motivation: ProfileMotivation) {
+    const next = values.motivations.includes(motivation)
       ? values.motivations.filter((value) => value !== motivation)
       : [...values.motivations, motivation];
     onChange({ motivations: next });
@@ -303,27 +332,29 @@ export function MotivationsFields({
 
   return (
     <div>
-      <div className="flex flex-wrap gap-2">
+      <ul className="flex flex-wrap gap-2">
         {MOTIVATION_OPTIONS.map((option) => {
           const selected = values.motivations.includes(option.value);
           return (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={selected}
-              onClick={() => toggleMotivation(option.value)}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
-                selected
-                  ? "border-accent bg-accent text-white shadow-card"
-                  : "border-line bg-background text-ink hover:border-accent/50"
-              } ${FOCUS_RING}`}
-            >
-              {selected && <CheckIcon className="size-3.5" />}
-              {option.label}
-            </button>
+            <li key={option.value}>
+              <button
+                type="button"
+                aria-pressed={selected}
+                onClick={() => toggle(option.value)}
+                className={cx(
+                  "rounded-full border px-4 py-2 text-sm font-medium transition-colors",
+                  selected
+                    ? "border-transparent bg-accent text-accent-ink"
+                    : "border-line bg-surface text-ink hover:border-ink",
+                )}
+              >
+                {selected && <CheckIcon className="mr-1.5 inline size-3.5" />}
+                {option.label}
+              </button>
+            </li>
           );
         })}
-      </div>
+      </ul>
       <FieldError message={errors.motivations} />
     </div>
   );
@@ -343,39 +374,6 @@ export function InterestsPickerFields({
   interestsError: string | null;
   onRetryInterests?: () => void;
 }) {
-  function toggleInterest(interestId: string) {
-    const selected = values.interest_ids.includes(interestId);
-    const next = selected
-      ? values.interest_ids.filter((id) => id !== interestId)
-      : [...values.interest_ids, interestId];
-    onChange({ interest_ids: next });
-  }
-
-  function addCustomInterest(name: string) {
-    const trimmed = name.trim();
-    if (!trimmed) {
-      return;
-    }
-    const folded = trimmed.toLowerCase();
-    const duplicatesExisting = values.custom_interest_names.some(
-      (existing) => existing.toLowerCase() === folded,
-    );
-    if (duplicatesExisting) {
-      return;
-    }
-    onChange({
-      custom_interest_names: [...values.custom_interest_names, trimmed],
-    });
-  }
-
-  function removeCustomInterest(name: string) {
-    onChange({
-      custom_interest_names: values.custom_interest_names.filter(
-        (existing) => existing !== name,
-      ),
-    });
-  }
-
   return (
     <>
       <InterestPicker
@@ -384,9 +382,23 @@ export function InterestsPickerFields({
         interestsError={interestsError}
         selectedIds={values.interest_ids}
         customNames={values.custom_interest_names}
-        onToggle={toggleInterest}
-        onAddCustom={addCustomInterest}
-        onRemoveCustom={removeCustomInterest}
+        onToggle={(id) =>
+          onChange({
+            interest_ids: values.interest_ids.includes(id)
+              ? values.interest_ids.filter((value) => value !== id)
+              : [...values.interest_ids, id],
+          })
+        }
+        onAddCustom={(name) =>
+          onChange({ custom_interest_names: [...values.custom_interest_names, name] })
+        }
+        onRemoveCustom={(name) =>
+          onChange({
+            custom_interest_names: values.custom_interest_names.filter(
+              (existing) => existing !== name,
+            ),
+          })
+        }
         onRetry={onRetryInterests}
       />
       <FieldError message={errors.interest_ids} />
@@ -402,24 +414,6 @@ export function OptionalFields({
 }: ProfileFieldGroupProps) {
   return (
     <>
-      <Field id="profile-relationship-intent" label="Looking for" optional>
-        <select
-          id="profile-relationship-intent"
-          value={values.relationship_intent}
-          onChange={(event) =>
-            onChange({ relationship_intent: event.target.value })
-          }
-          className={INPUT_CLASSES}
-        >
-          <option value="">Prefer not to say</option>
-          {RELATIONSHIP_INTENTS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </Field>
-
       <Field id="profile-height" label="Height in cm" optional error={errors.height_cm}>
         <input
           id="profile-height"
@@ -453,19 +447,6 @@ export function OptionalFields({
   );
 }
 
-interface ProfileFormFieldsProps {
-  values: ProfileFormValues;
-  errors: ProfileFieldErrors;
-  universities: University[];
-  universitiesLoading: boolean;
-  disabled: boolean;
-  interests: Interest[];
-  interestsLoading: boolean;
-  interestsError: string | null;
-  onRetryInterests?: () => void;
-  onChange: (patch: Partial<ProfileFormValues>) => void;
-}
-
 export function ProfileFormFields({
   values,
   errors,
@@ -477,63 +458,71 @@ export function ProfileFormFields({
   interestsError,
   onRetryInterests,
   onChange,
-}: ProfileFormFieldsProps) {
+}: {
+  values: ProfileFormValues;
+  errors: ProfileFieldErrors;
+  universities: University[];
+  universitiesLoading: boolean;
+  disabled: boolean;
+  interests: Interest[];
+  interestsLoading: boolean;
+  interestsError: string | null;
+  onRetryInterests?: () => void;
+  onChange: (patch: Partial<ProfileFormValues>) => void;
+}) {
   return (
-    <div className="text-left">
-      <fieldset disabled={disabled} className="min-w-0 space-y-5">
-        <FormSection title="The basics">
-          <BasicsFields values={values} errors={errors} onChange={onChange} />
-        </FormSection>
+    <fieldset disabled={disabled} className="min-w-0 space-y-10">
+      <FormSection title="The basics">
+        <BasicsFields values={values} errors={errors} onChange={onChange} />
+      </FormSection>
 
-        <FormSection
-          title="Your studies"
-          hint="Your university is matched against your student ID during verification."
-        >
-          <StudiesFields
-            values={values}
-            errors={errors}
-            onChange={onChange}
-            universities={universities}
-            universitiesLoading={universitiesLoading}
-          />
-        </FormSection>
+      <FormSection
+        title="Your studies"
+        hint="Your university is matched against your student ID during verification."
+      >
+        <StudiesFields
+          values={values}
+          errors={errors}
+          onChange={onChange}
+          universities={universities}
+          universitiesLoading={universitiesLoading}
+        />
+      </FormSection>
 
-        <FormSection title="Dating profile">
-          <AboutFields values={values} errors={errors} onChange={onChange} />
-          <OptionalFields values={values} errors={errors} onChange={onChange} />
-        </FormSection>
+      <FormSection
+        title="About you"
+        hint="This is what other students read after your photo."
+      >
+        <AboutFields values={values} errors={errors} onChange={onChange} />
+      </FormSection>
 
-        <FormSection
-          title="Why I'm here"
-          hint="Pick every reason that applies — this shapes who you meet."
-        >
-          <MotivationsFields values={values} errors={errors} onChange={onChange} />
-        </FormSection>
+      <FormSection title="Optional details">
+        <OptionalFields values={values} errors={errors} onChange={onChange} />
+      </FormSection>
 
-        <FormSection title="Your interests">
-          <InterestsPickerFields
-            values={values}
-            errors={errors}
-            onChange={onChange}
-            interests={interests}
-            interestsLoading={interestsLoading}
-            interestsError={interestsError}
-            onRetryInterests={onRetryInterests}
-          />
-        </FormSection>
-      </fieldset>
-    </div>
+      <FormSection title="Why I'm here" hint="Pick every reason that applies.">
+        <MotivationsFields values={values} errors={errors} onChange={onChange} />
+      </FormSection>
+
+      <FormSection title="Your interests">
+        <InterestsPickerFields
+          values={values}
+          errors={errors}
+          onChange={onChange}
+          interests={interests}
+          interestsLoading={interestsLoading}
+          interestsError={interestsError}
+          onRetryInterests={onRetryInterests}
+        />
+      </FormSection>
+    </fieldset>
   );
 }
 
 /**
- * Multi-select interest chips backed by the server catalog plus user-created
- * custom interests. Catalog toggles add or remove a selection; custom
- * interests are added by name (1–40 chars, no case-insensitive duplicate of
- * a catalog entry or an existing custom name) and removed with their chip.
- * Catalog and custom interests share one combined budget — at the limit,
- * further additions are refused with a clear message (deselection always
- * stays possible). The parent owns the selection state.
+ * Interest chips backed by the server catalog plus user-created entries.
+ * Catalog and custom share one budget; at the limit, additions are refused with
+ * a clear message while deselection stays possible. Parent owns the state.
  */
 function InterestPicker({
   interests,
@@ -556,41 +545,34 @@ function InterestPicker({
   onRemoveCustom: (name: string) => void;
   onRetry?: () => void;
 }) {
-  const [draftName, setDraftName] = useState("");
+  const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
-  const selectedCount = selectedIds.length + customNames.length;
-  const atLimit = selectedCount >= MAX_COMBINED_INTERESTS;
+  const count = selectedIds.length + customNames.length;
+  const atLimit = count >= MAX_COMBINED_INTERESTS;
+  const limitMessage = `That's the maximum of ${MAX_COMBINED_INTERESTS} interests — deselect one to pick another.`;
 
   function handleToggle(interest: Interest) {
-    const isSelected = selectedIds.includes(interest.id);
-    if (!isSelected && atLimit) {
-      setNotice(limitMessage());
+    const selected = selectedIds.includes(interest.id);
+    if (!selected && atLimit) {
+      setNotice(limitMessage);
       return;
     }
     setNotice(null);
     onToggle(interest.id);
   }
 
-  function limitMessage(): string {
-    return `That's the maximum of ${MAX_COMBINED_INTERESTS} interests — deselect one to pick another.`;
-  }
-
   function handleAddCustom() {
-    const trimmed = draftName.trim();
-    if (!trimmed) {
+    const name = draft.trim();
+    if (!name) {
       return;
     }
-    if (trimmed.length > MAX_CUSTOM_INTEREST_LENGTH) {
-      setNotice(
-        `Custom interests must be ${MAX_CUSTOM_INTEREST_LENGTH} characters or fewer.`,
-      );
+    if (name.length > MAX_CUSTOM_INTEREST_LENGTH) {
+      setNotice(`Custom interests must be ${MAX_CUSTOM_INTEREST_LENGTH} characters or fewer.`);
       return;
     }
-    const folded = trimmed.toLowerCase();
+    const folded = name.toLowerCase();
     if (interests.some((interest) => interest.name.toLowerCase() === folded)) {
-      setNotice(
-        `"${trimmed}" is already in the catalog — select it from the chips instead.`,
-      );
+      setNotice(`"${name}" is already in the catalog — select it from the chips.`);
       return;
     }
     if (customNames.some((existing) => existing.toLowerCase() === folded)) {
@@ -598,96 +580,97 @@ function InterestPicker({
       return;
     }
     if (atLimit) {
-      setNotice(limitMessage());
+      setNotice(limitMessage);
       return;
     }
     setNotice(null);
-    onAddCustom(trimmed);
-    setDraftName("");
+    onAddCustom(name);
+    setDraft("");
   }
 
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
         <p className="text-sm text-muted">
-          Pick up to {MAX_COMBINED_INTERESTS} things you love — add your own if
-          they&apos;re missing.
+          Up to {MAX_COMBINED_INTERESTS} things you&apos;re into — add your own
+          if they&apos;re missing.
         </p>
         <span className="shrink-0 text-xs font-medium text-muted">
-          {selectedCount}/{MAX_COMBINED_INTERESTS}
+          {count}/{MAX_COMBINED_INTERESTS}
         </span>
       </div>
 
       {interestsLoading ? (
-        <p className="mt-3 text-sm text-muted">Loading interests…</p>
+        <p className="mt-4 text-sm text-muted">Loading interests…</p>
       ) : interestsError ? (
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <p role="alert" className="text-sm font-medium text-red-600">
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <p role="alert" className="text-sm text-danger">
             {interestsError}
           </p>
           {onRetry && (
             <button
               type="button"
               onClick={onRetry}
-              className={`rounded-full border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+              className="rounded-full border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink"
             >
               Retry
             </button>
           )}
         </div>
       ) : (
-        <div className="mt-3 flex flex-wrap gap-2">
+        <ul className="mt-4 flex flex-wrap gap-2">
           {interests.map((interest) => {
             const selected = selectedIds.includes(interest.id);
             return (
-              <button
-                key={interest.id}
-                type="button"
-                aria-pressed={selected}
-                onClick={() => handleToggle(interest)}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-medium transition-colors ${
-                  selected
-                    ? "border-accent bg-accent text-white shadow-card"
-                    : "border-line bg-background text-ink hover:border-accent/50"
-                } ${FOCUS_RING}`}
-              >
-                {selected && <CheckIcon className="size-3.5" />}
-                {interest.name}
-              </button>
+              <li key={interest.id}>
+                <button
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => handleToggle(interest)}
+                  className={cx(
+                    "rounded-full border px-4 py-2 text-sm font-medium transition-colors",
+                    selected
+                      ? "border-transparent bg-accent text-accent-ink"
+                      : "border-line bg-surface text-ink hover:border-ink",
+                  )}
+                >
+                  {selected && <CheckIcon className="mr-1.5 inline size-3.5" />}
+                  {interest.name}
+                </button>
+              </li>
             );
           })}
           {customNames.map((name) => (
-            <span
-              key={name}
-              className="inline-flex items-center gap-1.5 rounded-full border border-accent bg-accent/10 px-4 py-2 text-sm font-medium text-ink"
-            >
-              {name}
-              <button
-                type="button"
-                aria-label={`Remove ${name}`}
-                onClick={() => {
-                  setNotice(null);
-                  onRemoveCustom(name);
-                }}
-                className={`rounded-full text-muted transition-colors hover:text-ink ${FOCUS_RING}`}
-              >
-                <XIcon className="size-3.5" />
-              </button>
-            </span>
+            <li key={name}>
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-accent bg-accent/12 px-4 py-2 text-sm font-medium text-ink">
+                {name}
+                <button
+                  type="button"
+                  aria-label={`Remove ${name}`}
+                  onClick={() => {
+                    setNotice(null);
+                    onRemoveCustom(name);
+                  }}
+                  className="text-muted transition-colors hover:text-ink"
+                >
+                  <XIcon className="size-3.5" />
+                </button>
+              </span>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
 
       {!interestsLoading && !interestsError && (
-        <div className="mt-3 flex max-w-sm items-center gap-2">
+        <div className="mt-4 flex max-w-sm items-center gap-2">
           <input
             id="profile-custom-interest"
             type="text"
             autoComplete="off"
             placeholder="Add your own…"
             maxLength={MAX_CUSTOM_INTEREST_LENGTH + 1}
-            value={draftName}
-            onChange={(event) => setDraftName(event.target.value)}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -699,21 +682,15 @@ function InterestPicker({
           <button
             type="button"
             onClick={handleAddCustom}
-            className={`shrink-0 rounded-2xl border border-line bg-surface px-4 py-3 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+            className="shrink-0 border border-line bg-surface px-4 py-3 text-sm font-semibold text-ink transition-colors hover:border-ink"
           >
             Add
           </button>
         </div>
       )}
 
-      <p aria-live="polite" className="mt-2 min-h-5 text-xs font-medium">
-        {notice ? (
-          <span className="text-accent">{notice}</span>
-        ) : (
-          <span className="sr-only">
-            {selectedCount} of {MAX_COMBINED_INTERESTS} interests selected
-          </span>
-        )}
+      <p aria-live="polite" className="mt-2 min-h-5 text-xs font-medium text-accent">
+        {notice}
       </p>
     </div>
   );
@@ -757,7 +734,7 @@ function FieldError({ message }: { message: string | undefined }) {
     return null;
   }
   return (
-    <p role="alert" className="mt-1.5 text-sm font-medium text-red-600">
+    <p role="alert" className="mt-2 text-sm font-medium text-danger">
       {message}
     </p>
   );

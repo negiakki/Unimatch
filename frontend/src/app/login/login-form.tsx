@@ -2,23 +2,28 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useState, type FormEvent } from "react";
 
-import { ProfileApiError, fetchMyProfile } from "@/lib/api/profile";
+import {
+  AuthDivider,
+  GoogleSignInButton,
+  destinationAfterAuth,
+} from "@/components/google-sign-in-button";
+import { Button } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 
 /**
  * Sign-in form backed by the existing Supabase browser client.
  * Calls supabase.auth.signInWithPassword(); @supabase/ssr persists the
- * session cookie, so /verify can read the access token as usual.
- * After sign-in the caller's profile is checked: without a profile the user
- * continues to /onboarding, with one to the verification flow.
+ * session cookie. After sign-in the caller's profile is checked: without a
+ * profile the user continues to /onboarding, with one to verification.
+ *
+ * Google sign-in sits above the form and reuses that same profile check
+ * through destinationAfterAuth(), so both routes enter the same flow.
  */
 
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
-const INPUT_CLASSES = `w-full rounded-2xl border border-line bg-surface px-4 py-3.5 text-[15px] text-ink shadow-card placeholder:text-muted/60 focus:border-accent disabled:opacity-40 ${FOCUS_RING}`;
+const INPUT_CLASSES =
+  "w-full border border-line bg-surface px-4 py-3 text-[15px] text-ink placeholder:text-muted/60 disabled:opacity-40";
 
 function messageForAuthError(error: {
   code?: string | undefined;
@@ -43,50 +48,6 @@ function messageForAuthError(error: {
   }
 }
 
-function Icon({ children, className }: { children: ReactNode; className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={className}
-    >
-      {children}
-    </svg>
-  );
-}
-
-/**
- * Post-sign-in destination: users without a profile go to onboarding;
- * everyone else continues to the verification flow. If the profile check
- * can't complete (network, backend hiccup) the pre-existing default
- * (/verify) applies so sign-in is never blocked by it.
- */
-async function destinationAfterSignIn(): Promise<string> {
-  try {
-    await fetchMyProfile();
-    return "/verify";
-  } catch (error) {
-    if (error instanceof ProfileApiError && error.code === "not_found") {
-      return "/onboarding";
-    }
-    return "/verify";
-  }
-}
-
-function LockIcon({ className }: { className?: string }) {
-  return (
-    <Icon className={className}>
-      <rect width="18" height="11" x="3" y="11" rx="2" />
-      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-    </Icon>
-  );
-}
-
 export function LoginForm() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -109,8 +70,7 @@ export function LoginForm() {
     setSubmitting(true);
     setError(null);
     try {
-      const supabase = createClient();
-      const { error: authError } = await supabase.auth.signInWithPassword({
+      const { error: authError } = await createClient().auth.signInWithPassword({
         email: trimmedEmail,
         password,
       });
@@ -118,7 +78,7 @@ export function LoginForm() {
         setError(messageForAuthError(authError));
         return;
       }
-      router.replace(await destinationAfterSignIn());
+      router.replace(await destinationAfterAuth());
     } catch {
       setError(
         "We couldn't reach the sign-in service. Check your connection and try again.",
@@ -129,76 +89,69 @@ export function LoginForm() {
   }
 
   return (
-    <section className="pt-14 text-center">
-      <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-accent/15 text-accent">
-        <LockIcon className="size-7" />
-      </div>
-      <h1 className="mt-5 text-3xl font-bold tracking-tight">Sign in</h1>
-      <p className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted">
-        Welcome back. Sign in to continue with your student verification.
+    <form onSubmit={handleSubmit} noValidate>
+      <GoogleSignInButton />
+      <AuthDivider />
+
+      <label htmlFor="login-email" className="block text-sm font-semibold">
+        Email
+      </label>
+      <input
+        id="login-email"
+        type="email"
+        autoComplete="email"
+        inputMode="email"
+        placeholder="you@university.edu"
+        value={email}
+        onChange={(event) => setEmail(event.target.value)}
+        disabled={submitting}
+        className={`mt-2 ${INPUT_CLASSES}`}
+      />
+
+      <label
+        htmlFor="login-password"
+        className="mt-6 block text-sm font-semibold"
+      >
+        Password
+      </label>
+      <input
+        id="login-password"
+        type="password"
+        autoComplete="current-password"
+        placeholder="Your password"
+        value={password}
+        onChange={(event) => setPassword(event.target.value)}
+        disabled={submitting}
+        className={`mt-2 ${INPUT_CLASSES}`}
+      />
+
+      {error && (
+        <p role="alert" className="mt-4 text-sm font-medium text-danger">
+          {error}
+        </p>
+      )}
+      <p aria-live="polite" className="sr-only">
+        {submitting ? "Signing you in" : ""}
       </p>
 
-      <form onSubmit={handleSubmit} noValidate className="mt-8 text-left">
-        <label htmlFor="login-email" className="text-sm font-semibold">
-          Email
-        </label>
-        <input
-          id="login-email"
-          type="email"
-          autoComplete="email"
-          inputMode="email"
-          placeholder="you@university.edu"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          disabled={submitting}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-        />
+      <Button
+        type="submit"
+        className="mt-8 w-full"
+        disabled={submitting}
+        aria-busy={submitting}
+      >
+        {submitting ? "Signing in…" : "Sign in"}
+      </Button>
 
-        <label
-          htmlFor="login-password"
-          className="mt-4 block text-sm font-semibold"
-        >
-          Password
-        </label>
-        <input
-          id="login-password"
-          type="password"
-          autoComplete="current-password"
-          placeholder="Your password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          disabled={submitting}
-          className={`mt-1.5 ${INPUT_CLASSES}`}
-        />
-
-        {error && (
-          <p role="alert" className="mt-3 text-sm font-medium text-red-600">
-            {error}
-          </p>
-        )}
-        <p aria-live="polite" className="sr-only">
-          {submitting ? "Signing you in" : ""}
-        </p>
-
-        <button
-          type="submit"
-          disabled={submitting}
-          aria-busy={submitting}
-          className={`mt-5 w-full rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
-        >
-          {submitting ? "Signing in…" : "Sign in"}
-        </button>
-      </form>
-
-      <p className="mt-4 text-center text-sm text-muted">
+      <p className="mt-6 text-sm text-muted">
         Don&apos;t have an account yet?{" "}
         <Link
           href="/signup"
-          className="font-semibold text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="font-semibold text-ink underline underline-offset-4"
         >
           Create an account
         </Link>
       </p>
-    </section>
+    </form>
   );
 }

@@ -1,108 +1,49 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
-import { AppHeader } from "@/components/app-header";
+import { AppNav, TAB_BAR_SPACE } from "@/components/app-nav";
+import { SignOutButton } from "@/components/sign-out-button";
 import {
+  Avatar,
+  ButtonLink,
+  EmptyState,
+  ErrorState,
+  Label,
+  LoadingBlock,
+  SuspendedState,
+} from "@/components/ui";
+import { primaryPhotoUrl } from "@/lib/api/discovery";
+import { isSuspended, isUnauthorized } from "@/lib/api/http";
+import {
+  CHAT_LIFETIME_HOURS,
   fetchConversations,
-  MessagingApiError,
-  type ConversationEntry,
+  type Conversation,
 } from "@/lib/api/messaging";
-import type { DiscoveryCandidate } from "@/lib/api/discovery";
+import { formatEventDate } from "@/lib/format";
 
 /**
- * /messages — the signed-in user's conversations (one per active match),
- * newest first. Each row shows the matched profile (the same client-safe
- * shape as the matches list) and the caller's unread count; opening a row
- * goes to the conversation view.
+ * /messages — one conversation per active match, each carrying the
+ * OPPORTUNITY it belongs to. The reason for talking is always visible, and the
+ * temporary nature of the chat is stated once here rather than nagging in every
+ * thread.
+ *
+ * The backend already drops conversations after 24 hours without a message, so
+ * this list only ever shows live ones.
  */
-
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
-function errorMessageFor(error: unknown): string {
-  if (error instanceof MessagingApiError) {
-    return error.message;
-  }
-  return "Something went wrong. Please try again.";
-}
-
-function displayablePhoto(candidate: DiscoveryCandidate) {
-  return candidate.photos.find((photo) => photo.url)?.url ?? null;
-}
-
-function ConversationRow({
-  conversation,
-}: {
-  conversation: ConversationEntry;
-}) {
-  const profile = conversation.profile;
-  const firstName = profile.first_name ?? "Student";
-  const photoUrl = displayablePhoto(profile);
-  const universityPlace = [profile.university.name, profile.university.city]
-    .filter(Boolean)
-    .join(" · ");
-
-  return (
-    <Link
-      href={`/messages/${conversation.id}`}
-      className={`rounded-card border-line bg-surface shadow-card flex items-center gap-4 border p-4 transition-transform active:scale-[0.99] ${FOCUS_RING}`}
-    >
-      <span className="bg-accent/10 relative size-14 shrink-0 overflow-hidden rounded-full">
-        {photoUrl ? (
-          <Image
-            src={photoUrl}
-            alt=""
-            fill
-            unoptimized
-            sizes="56px"
-            className="object-cover"
-          />
-        ) : (
-          <span
-            aria-hidden
-            className="text-accent grid size-full place-items-center text-xl font-bold"
-          >
-            {firstName.charAt(0).toUpperCase()}
-          </span>
-        )}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2">
-          <span className="text-ink truncate text-[15px] font-bold tracking-tight">
-            {firstName}
-          </span>
-          {profile.age !== null && (
-            <span className="text-muted shrink-0 text-sm">{profile.age}</span>
-          )}
-        </span>
-        {universityPlace && (
-          <span className="text-muted mt-0.5 block truncate text-sm">
-            {universityPlace}
-          </span>
-        )}
-      </span>
-      {conversation.unread_count > 0 && (
-        <span className="bg-accent grid min-w-6 shrink-0 place-items-center rounded-full px-1.5 py-0.5 text-xs font-bold text-white">
-          {conversation.unread_count > 99 ? "99+" : conversation.unread_count}
-        </span>
-      )}
-    </Link>
-  );
-}
 
 export default function MessagesPage() {
   const router = useRouter();
-  const [phase, setPhase] = useState<"loading" | "ready" | "error">("loading");
-  const [conversations, setConversations] = useState<ConversationEntry[]>([]);
-  const [error, setError] = useState<MessagingApiError | null>(null);
+  const [phase, setPhase] = useState<"loading" | "ready" | "error" | "suspended">(
+    "loading",
+  );
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const page = await fetchConversations();
-    setConversations(page.conversations);
+    setConversations(await fetchConversations());
   }, []);
 
   useEffect(() => {
@@ -111,100 +52,133 @@ export default function MessagesPage() {
         await load();
         setPhase("ready");
       } catch (caught) {
-        if (
-          caught instanceof MessagingApiError &&
-          caught.code === "unauthorized"
-        ) {
+        if (isUnauthorized(caught)) {
           router.replace("/login");
           return;
         }
-        console.error("Failed to load conversations:", caught);
-        setError(caught instanceof MessagingApiError ? caught : null);
+        if (isSuspended(caught)) {
+          setPhase("suspended");
+          return;
+        }
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "Something went wrong. Please try again.",
+        );
         setPhase("error");
       }
     })();
   }, [load, router]);
 
+  function retry() {
+    setPhase("loading");
+    setError(null);
+    void load()
+      .then(() => setPhase("ready"))
+      .catch((caught: unknown) => {
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "Something went wrong. Please try again.",
+        );
+        setPhase("error");
+      });
+  }
+
   return (
     <>
-      <AppHeader />
-      <main className="mx-auto w-full max-w-lg px-5 pb-16">
-        <section className="pt-10">
-          <div className="flex items-center justify-between">
-            <h1 className="text-3xl font-bold tracking-tight">Messages</h1>
-          </div>
-
-          {phase === "loading" && (
-            <div className="mt-8 space-y-4" aria-busy="true" aria-live="polite">
-              <span className="sr-only">Loading your conversations</span>
-              {[0, 1, 2].map((index) => (
-                <div
-                  key={index}
-                  className="rounded-card bg-line h-[88px] animate-pulse"
-                />
-              ))}
-            </div>
-          )}
-
-          {phase === "error" && (
-            <div className="mt-8 text-center">
-              <p
-                role="alert"
-                className="text-muted text-[15px] leading-relaxed"
-              >
-                {errorMessageFor(error)}
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setPhase("loading");
-                  setError(null);
-                  void load()
-                    .then(() => setPhase("ready"))
-                    .catch((caught: unknown) => {
-                      console.error("Failed to load conversations:", caught);
-                      setError(
-                        caught instanceof MessagingApiError ? caught : null,
-                      );
-                      setPhase("error");
-                    });
-                }}
-                className={`border-line bg-surface text-ink shadow-card mt-6 w-full rounded-2xl border py-3.5 font-semibold transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-              >
-                Try again
-              </button>
-            </div>
-          )}
-
-          {phase === "ready" && conversations.length === 0 && (
-            <div className="mt-16 text-center">
-              <h2 className="text-2xl font-bold tracking-tight">
-                No conversations yet
-              </h2>
-              <p className="text-muted mx-auto mt-3 max-w-sm text-[15px] leading-relaxed">
-                Message one of your matches to start a conversation.
-              </p>
-              <Link
-                href="/matches"
-                className={`bg-accent shadow-card mt-8 inline-block w-full rounded-2xl py-3.5 font-semibold text-white transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-              >
-                View matches
-              </Link>
-            </div>
-          )}
-
-          {phase === "ready" && conversations.length > 0 && (
-            <div className="mt-8 space-y-4">
-              {conversations.map((conversation) => (
-                <ConversationRow
-                  key={conversation.id}
-                  conversation={conversation}
-                />
-              ))}
-            </div>
-          )}
+      <AppNav />
+      <main className={`mx-auto w-full max-w-6xl px-5 sm:px-8 ${TAB_BAR_SPACE}`}>
+        <section
+          data-category="social"
+          className="animate-rise -mx-5 px-5 pt-10 pb-8 sm:-mx-8 sm:px-8"
+        >
+          <Label>Chats</Label>
+          <h1 className="type-display mt-4 text-display">Talks that start somewhere</h1>
+          <p className="mt-4 max-w-lg text-[15px] leading-relaxed text-muted">
+            Each chat belongs to the opportunity you matched through, and stays
+            open for {CHAT_LIFETIME_HOURS} hours after your last message.
+          </p>
         </section>
+
+        {phase === "suspended" && (
+          <SuspendedState
+            message="Your account has been suspended from participating in UniMatch."
+            action={<SignOutButton />}
+          />
+        )}
+
+        {phase === "loading" && <LoadingBlock label="Loading your chats" rows={4} />}
+
+        {phase === "error" && (
+          <ErrorState
+            message={error ?? "We couldn't load your chats."}
+            onRetry={retry}
+          />
+        )}
+
+        {phase === "ready" && conversations.length === 0 && (
+          <EmptyState
+            title="No chats yet"
+            body="When you and another student both want a partner for the same opportunity, you can start talking."
+            action={<ButtonLink href="/explore">Find an opportunity</ButtonLink>}
+          />
+        )}
+
+        {phase === "ready" && conversations.length > 0 && (
+          <ul className="divide-y divide-line border-t border-line">
+            {conversations.map((conversation) => (
+              <li key={conversation.id}>
+                <ConversationRow conversation={conversation} />
+              </li>
+            ))}
+          </ul>
+        )}
       </main>
     </>
+  );
+}
+
+function ConversationRow({ conversation }: { conversation: Conversation }) {
+  const name = conversation.profile.first_name ?? "Student";
+  const reason = conversation.opportunity?.title;
+  const place = [conversation.opportunity?.opportunity_date, conversation.opportunity?.location]
+    .filter(Boolean)
+    .map((value, index) => (index === 0 ? formatEventDate(value) : value))
+    .join(" · ");
+
+  return (
+    <Link
+      href={`/messages/${conversation.id}`}
+      data-category="social"
+      className="group flex items-center gap-4 py-5 transition-colors hover:bg-accent/5 sm:gap-5"
+    >
+      <Avatar
+        src={primaryPhotoUrl(conversation.profile)}
+        name={conversation.profile.first_name}
+        size="md"
+      />
+      <span className="min-w-0 flex-1">
+        {/* Context first: why are these two talking? */}
+        <span className="type-meta block truncate text-accent">
+          {reason ? `Matched for ${reason}` : "Matched"}
+        </span>
+        <span className="mt-1 block truncate text-lg font-bold tracking-tight">
+          {name}
+        </span>
+        <span className="mt-0.5 block truncate text-sm text-muted">{place}</span>
+      </span>
+      {conversation.unread_count > 0 && (
+        <span className="grid size-7 shrink-0 place-items-center rounded-full bg-accent text-xs font-bold text-accent-ink">
+          {conversation.unread_count > 9 ? "9+" : conversation.unread_count}
+        </span>
+      )}
+      <span
+        aria-hidden
+        className="shrink-0 text-muted transition-transform duration-300 group-hover:translate-x-1 group-hover:text-accent"
+      >
+        →
+      </span>
+    </Link>
   );
 }

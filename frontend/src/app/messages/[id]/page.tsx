@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -12,70 +11,59 @@ import {
 } from "react";
 
 import {
+  Avatar,
+  Button,
+  Label,
+  SuspendedState,
+} from "@/components/ui";
+import { SignOutButton } from "@/components/sign-out-button";
+import { primaryPhotoUrl } from "@/lib/api/discovery";
+import { isSuspended, isUnauthorized } from "@/lib/api/http";
+import {
+  CHAT_LIFETIME_HOURS,
   fetchConversations,
   fetchMessages,
   markConversationRead,
   MAX_MESSAGE_LENGTH,
-  MessagingApiError,
   sendMessage,
   type ChatMessage,
-  type ConversationEntry,
+  type Conversation,
 } from "@/lib/api/messaging";
 import {
   blockUser,
   MAX_REPORT_DETAIL_LENGTH,
   REPORT_REASON_OPTIONS,
   reportUser,
-  SafetyApiError,
   type ReportReason,
 } from "@/lib/api/safety";
+import { categoryKey, cx, formatEventDate, formatMessageTime } from "@/lib/format";
 
 /**
- * /messages/[id] — one conversation (a match id). Shows the newest page of
- * history in chronological order with a "load earlier" control, and polls
- * the first page (~every 5s) while the conversation is open, marking it read
- * so the unread badge stays accurate. Sending is participant-only and
- * immutable once delivered; an unmatched — or blocked — conversation
- * surfaces as gone. The header carries the safety actions: Report (inline
- * form, admin-reviewed, no automatic consequences) and Block (confirmed,
- * silently hides the pair from discovery/matches/messaging both ways until
- * unblocked).
+ * /messages/[id] — one conversation (its id IS the match id).
+ *
+ * The header keeps the opportunity visible, so the thread never reads as an
+ * open-ended social inbox. Chats are temporary: the backend expires a
+ * conversation 24 hours after the last message, and the fact is stated once in
+ * the header rather than repeated.
+ *
+ * Polling (not realtime subscriptions) refreshes the open thread; blocked or
+ * expired conversations surface as gone. Safety actions live here: report is an
+ * admin-reviewed receipt with no automatic consequence, block silently hides
+ * the pair in both directions.
  */
 
 const POLL_INTERVAL_MS = 5000;
 const PAGE_SIZE = 30;
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
-function displayablePhoto(conversation: ConversationEntry) {
-  return conversation.profile.photos.find((photo) => photo.url)?.url ?? null;
-}
-
-function timeLabel(iso: string | null): string {
-  if (!iso) {
-    return "";
-  }
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return date.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
+type Phase = "loading" | "ready" | "gone" | "error" | "suspended";
 
 export default function ConversationPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const conversationId = typeof params?.id === "string" ? params.id : "";
 
-  const [phase, setPhase] = useState<"loading" | "ready" | "gone" | "error">(
-    "loading",
-  );
-  const [conversation, setConversation] = useState<ConversationEntry | null>(
-    null,
-  );
+  const [phase, setPhase] = useState<Phase>("loading");
+  const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -92,7 +80,7 @@ export default function ConversationPage() {
   const [reportDetail, setReportDetail] = useState("");
   const [safetyError, setSafetyError] = useState<string | null>(null);
 
-  const mergeMessages = useCallback((incoming: ChatMessage[]) => {
+  const merge = useCallback((incoming: ChatMessage[]) => {
     setMessages((current) => {
       const byId = new Map(current.map((message) => [message.id, message]));
       for (const message of incoming) {
@@ -105,8 +93,7 @@ export default function ConversationPage() {
     });
   }, []);
 
-  // Initial load: newest page of history + the partner profile from the
-  // conversations list + an initial read-marker.
+  // Initial load: newest page, the partner + opportunity context, read marker.
   useEffect(() => {
     if (!conversationId) {
       return;
@@ -118,63 +105,62 @@ export default function ConversationPage() {
           fetchConversations(),
         ]);
         const entry =
-          conversations.conversations.find(
-            (candidate) => candidate.id === conversationId,
-          ) ?? null;
+          conversations.find((item) => item.id === conversationId) ?? null;
         if (!entry) {
           setPhase("gone");
           return;
         }
         setConversation(entry);
-        mergeMessages(page.messages);
+        merge(page.messages);
         setOlderCursor(page.next_cursor);
         await markConversationRead(conversationId);
         setPhase("ready");
       } catch (caught) {
-        if (
-          caught instanceof MessagingApiError &&
-          caught.code === "unauthorized"
-        ) {
+        if (isUnauthorized(caught)) {
           router.replace("/login");
           return;
         }
+        if (isSuspended(caught)) {
+          setPhase("suspended");
+          return;
+        }
         if (
-          caught instanceof MessagingApiError &&
-          caught.code === "not_found"
+          caught instanceof Error &&
+          "code" in caught &&
+          (caught as { code: string }).code === "not_found"
         ) {
           setPhase("gone");
           return;
         }
-        console.error("Failed to load conversation:", caught);
-        setError(caught instanceof MessagingApiError ? caught.message : null);
+        setError(caught instanceof Error ? caught.message : null);
         setPhase("error");
       }
     })();
-  }, [conversationId, mergeMessages, router]);
+  }, [conversationId, merge, router]);
 
-  // Poll the open conversation (~every 5s): newest page + read marker.
-  // Background tabs skip polling; poll failures never kick the user out.
+  // Poll the open thread; hidden tabs skip it and failures never kick the user.
   useEffect(() => {
     if (phase !== "ready") {
       return;
     }
-    const poll = async () => {
+    const interval = setInterval(() => {
       if (document.hidden) {
         return;
       }
-      try {
-        const page = await fetchMessages(conversationId, { limit: PAGE_SIZE });
-        mergeMessages(page.messages);
-        await markConversationRead(conversationId);
-      } catch (caught) {
-        console.error("Conversation poll failed:", caught);
-      }
-    };
-    const interval = setInterval(() => void poll(), POLL_INTERVAL_MS);
+      void fetchMessages(conversationId, { limit: PAGE_SIZE })
+        .then(async (page) => {
+          merge(page.messages);
+          await markConversationRead(conversationId);
+        })
+        .catch((caught: unknown) => {
+          if (isSuspended(caught)) {
+            setPhase("suspended");
+          }
+        });
+    }, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [conversationId, mergeMessages, phase]);
+  }, [conversationId, merge, phase]);
 
-  // Keep the newest message in view.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length]);
@@ -189,11 +175,10 @@ export default function ConversationPage() {
         cursor: olderCursor,
         limit: PAGE_SIZE,
       });
-      mergeMessages(page.messages);
+      merge(page.messages);
       setOlderCursor(page.next_cursor);
     } catch (caught) {
-      console.error("Failed to load earlier messages:", caught);
-      setError(caught instanceof MessagingApiError ? caught.message : null);
+      setError(caught instanceof Error ? caught.message : null);
     } finally {
       setLoadingOlder(false);
     }
@@ -207,41 +192,25 @@ export default function ConversationPage() {
     setSending(true);
     setError(null);
     try {
-      const message = await sendMessage(conversationId, body);
+      merge([await sendMessage(conversationId, body)]);
       setDraft("");
-      mergeMessages([message]);
     } catch (caught) {
-      if (
-        caught instanceof MessagingApiError &&
-        caught.code === "unauthorized"
-      ) {
+      if (isUnauthorized(caught)) {
         router.replace("/login");
         return;
       }
-      setError(caught instanceof MessagingApiError ? caught.message : null);
+      setError(caught instanceof Error ? caught.message : null);
     } finally {
       setSending(false);
     }
-  }
-
-  const firstName = conversation?.profile.first_name ?? "Student";
-  const photoUrl = conversation ? displayablePhoto(conversation) : null;
-
-  function closeReportPanel() {
-    setReportOpen(false);
-    setReportDone(false);
-    setReportDetail("");
-    setSafetyError(null);
   }
 
   async function handleBlock() {
     if (!conversation || blockBusy) {
       return;
     }
-    const confirmed = window.confirm(
-      `Block ${firstName}? You won't see each other and your conversation will be hidden.`,
-    );
-    if (!confirmed) {
+    const name = conversation.profile.first_name ?? "this person";
+    if (!window.confirm(`Block ${name}? You won't see each other any more.`)) {
       return;
     }
     setBlockBusy(true);
@@ -250,15 +219,12 @@ export default function ConversationPage() {
       await blockUser(conversation.profile.id);
       router.replace("/messages");
     } catch (caught) {
-      if (caught instanceof SafetyApiError && caught.code === "unauthorized") {
+      if (isUnauthorized(caught)) {
         router.replace("/login");
         return;
       }
-      console.error("Failed to block:", caught);
       setSafetyError(
-        caught instanceof SafetyApiError
-          ? caught.message
-          : "Something went wrong. Please try again.",
+        caught instanceof Error ? caught.message : "That didn't work. Try again.",
       );
     } finally {
       setBlockBusy(false);
@@ -280,54 +246,68 @@ export default function ConversationPage() {
       });
       setReportDone(true);
     } catch (caught) {
-      if (caught instanceof SafetyApiError && caught.code === "unauthorized") {
-        router.replace("/login");
-        return;
-      }
-      console.error("Failed to report:", caught);
       setSafetyError(
-        caught instanceof SafetyApiError
-          ? caught.message
-          : "Something went wrong. Please try again.",
+        caught instanceof Error ? caught.message : "That didn't work. Try again.",
       );
     } finally {
       setReportBusy(false);
     }
   }
 
+  if (phase === "suspended") {
+    return (
+      <SuspendedState
+        message="Your account has been suspended from participating in UniMatch."
+        action={<SignOutButton />}
+      />
+    );
+  }
+
+  const name = conversation?.profile.first_name ?? "Student";
+  const reason = conversation?.opportunity?.title ?? null;
+  const when = conversation?.opportunity?.opportunity_date
+    ? formatEventDate(conversation.opportunity.opportunity_date)
+    : "";
+  const place = conversation?.opportunity?.location ?? "";
+
   return (
-    <main className="mx-auto flex h-dvh w-full max-w-lg flex-col px-5">
-      <header className="flex items-center gap-3 border-b border-line py-4">
+    <div
+      data-category={categoryKey(conversation?.opportunity?.category ?? {})}
+      className="flex h-dvh flex-col"
+    >
+      <header className="flex items-center gap-3 border-b border-line px-4 py-3">
         <Link
           href="/messages"
-          aria-label="Back to conversations"
-          className={`grid size-10 shrink-0 place-items-center rounded-full border border-line bg-surface text-lg text-ink shadow-card ${FOCUS_RING}`}
+          aria-label="Back to chats"
+          className="grid size-10 shrink-0 place-items-center rounded-full border border-line text-ink transition-colors hover:border-ink"
         >
           <span aria-hidden>←</span>
         </Link>
-        <span className="relative size-10 shrink-0 overflow-hidden rounded-full bg-accent/10">
-          {photoUrl ? (
-            <Image
-              src={photoUrl}
-              alt=""
-              fill
-              unoptimized
-              sizes="40px"
-              className="object-cover"
-            />
-          ) : (
-            <span
-              aria-hidden
-              className="grid size-full place-items-center text-base font-bold text-accent"
-            >
-              {firstName.charAt(0).toUpperCase()}
-            </span>
+
+        {conversation && (
+          <Avatar
+            src={primaryPhotoUrl(conversation.profile)}
+            name={conversation.profile.first_name}
+            size="sm"
+            className="size-10"
+          />
+        )}
+
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-[15px] font-bold tracking-tight">
+            {phase === "ready" ? name : "Chat"}
+          </h1>
+          {/* Why this conversation exists, plus the temporary nature. */}
+          {reason && (
+            <p className="truncate text-[12px] text-muted">
+              {reason}
+              {when || place ? ` · ${[when, place].filter(Boolean).join(" · ")}` : ""}
+              <span className="text-muted/70"> · open {CHAT_LIFETIME_HOURS}h</span>
+            </p>
           )}
-        </span>
-        <h1 className="min-w-0 flex-1 truncate text-lg font-bold tracking-tight">
-          {phase === "ready" ? firstName : "Conversation"}
-        </h1>
-        {phase === "ready" && conversation && (
+        </div>
+
+        {phase === "ready" && (
           <div className="flex shrink-0 items-center gap-2">
             {!reportOpen && (
               <button
@@ -337,7 +317,7 @@ export default function ConversationPage() {
                   setSafetyError(null);
                 }}
                 disabled={blockBusy}
-                className={`rounded-xl border border-line bg-surface px-3 py-2 text-sm font-semibold text-muted transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+                className="rounded-full border border-line px-3 py-1.5 text-[13px] font-semibold text-muted transition-colors hover:border-ink hover:text-ink disabled:opacity-40"
               >
                 Report
               </button>
@@ -347,7 +327,7 @@ export default function ConversationPage() {
               onClick={() => void handleBlock()}
               disabled={blockBusy}
               aria-busy={blockBusy}
-              className={`rounded-xl border border-line bg-surface px-3 py-2 text-sm font-semibold text-muted transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+              className="rounded-full border border-line px-3 py-1.5 text-[13px] font-semibold text-muted transition-colors hover:border-ink hover:text-ink disabled:opacity-40"
             >
               {blockBusy ? "Blocking…" : "Block"}
             </button>
@@ -356,34 +336,29 @@ export default function ConversationPage() {
       </header>
 
       {phase === "ready" && reportOpen && (
-        <section
-          aria-label={`Report ${firstName}`}
-          className="border-b border-line py-4"
-        >
+        <section aria-label={`Report ${name}`} className="border-b border-line p-4">
           {reportDone ? (
-            <div className="text-center">
-              <p className="text-[15px] leading-relaxed text-ink">
-                Thank you. Our team will review this report.
+            <div>
+              <p className="text-[15px] leading-relaxed">
+                Thanks — our team will review this.
               </p>
-              <button
-                type="button"
-                onClick={closeReportPanel}
-                className={`mt-4 rounded-2xl border border-line bg-surface px-5 py-2.5 text-sm font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+              <Button
+                variant="outline"
+                className="mt-4 px-5 py-2 text-[13px]"
+                onClick={() => {
+                  setReportOpen(false);
+                  setReportDone(false);
+                  setReportDetail("");
+                }}
               >
                 Done
-              </button>
+              </Button>
             </div>
           ) : (
-            <form
-              onSubmit={(event) => void handleReportSubmit(event)}
-              className="space-y-3"
-            >
+            <form onSubmit={(event) => void handleReportSubmit(event)} className="space-y-3">
               <div>
-                <label
-                  htmlFor="report-reason"
-                  className="block text-sm font-semibold text-ink"
-                >
-                  Report {firstName}
+                <label htmlFor="report-reason" className="block text-sm font-semibold">
+                  What&apos;s wrong?
                 </label>
                 <select
                   id="report-reason"
@@ -391,7 +366,7 @@ export default function ConversationPage() {
                   onChange={(event) =>
                     setReportReason(event.target.value as ReportReason)
                   }
-                  className="mt-2 w-full rounded-2xl border border-line bg-surface px-4 py-2.5 text-[15px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="mt-2 w-full rounded-full border border-line bg-surface px-4 py-2.5 text-[15px] text-ink"
                 >
                   {REPORT_REASON_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -401,10 +376,7 @@ export default function ConversationPage() {
                 </select>
               </div>
               <div>
-                <label
-                  htmlFor="report-detail"
-                  className="block text-sm font-semibold text-ink"
-                >
+                <label htmlFor="report-detail" className="block text-sm font-semibold">
                   Details <span className="font-normal text-muted">(optional)</span>
                 </label>
                 <textarea
@@ -414,31 +386,31 @@ export default function ConversationPage() {
                   rows={3}
                   maxLength={MAX_REPORT_DETAIL_LENGTH}
                   placeholder="What happened?"
-                  className="mt-2 w-full resize-none rounded-2xl border border-line bg-surface px-4 py-2.5 text-[15px] text-ink placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="mt-2 w-full resize-none border border-line bg-surface px-4 py-2.5 text-[15px] text-ink placeholder:text-muted/70"
                 />
               </div>
               {safetyError && (
-                <p role="alert" className="text-sm text-muted">
+                <p role="alert" className="text-sm text-danger">
                   {safetyError}
                 </p>
               )}
-              <div className="flex items-center gap-2">
-                <button
-                  type="submit"
-                  disabled={reportBusy}
-                  aria-busy={reportBusy}
-                  className={`rounded-2xl bg-accent px-5 py-2.5 text-sm font-semibold text-white shadow-card transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
-                >
+              <div className="flex gap-2">
+                <Button type="submit" disabled={reportBusy} className="px-5 py-2.5 text-[13px]">
                   {reportBusy ? "Sending…" : "Send report"}
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  onClick={closeReportPanel}
+                  variant="outline"
+                  className="px-5 py-2.5 text-[13px]"
                   disabled={reportBusy}
-                  className={`rounded-2xl border border-line bg-surface px-5 py-2.5 text-sm font-semibold text-muted transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
+                  onClick={() => {
+                    setReportOpen(false);
+                    setReportDone(false);
+                    setSafetyError(null);
+                  }}
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </form>
           )}
@@ -451,86 +423,80 @@ export default function ConversationPage() {
           {[0, 1, 2].map((index) => (
             <div
               key={index}
-              className={`h-12 w-2/3 animate-pulse rounded-2xl bg-line ${
-                index % 2 === 1 ? "ml-auto" : ""
-              }`}
+              className={cx(
+                "h-12 w-2/3 animate-pulse bg-line",
+                index % 2 === 1 && "ml-auto",
+              )}
             />
           ))}
         </div>
       )}
 
-      {phase === "gone" && (
-        <div className="flex flex-1 flex-col items-center justify-center text-center">
-          <h2 className="text-2xl font-bold tracking-tight">
-            Conversation unavailable
+      {(phase === "gone" || phase === "error") && (
+        <div className="flex flex-1 flex-col items-start justify-center px-5">
+          <Label>{phase === "gone" ? "Closed" : "Problem"}</Label>
+          <h2 className="type-display mt-3 text-title">
+            {phase === "gone"
+              ? "This chat has closed"
+              : "Something went wrong"}
           </h2>
-          <p className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted">
-            This conversation is no longer available.
+          <p className="mt-3 max-w-sm text-[15px] leading-relaxed text-muted">
+            {phase === "gone"
+              ? `Chats stay open for ${CHAT_LIFETIME_HOURS} hours after your last message. Your match is still on your matches page.`
+              : (error ?? "Please try again in a moment.")}
           </p>
           <Link
-            href="/messages"
-            className={`mt-8 inline-block w-full rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
+            href="/matches"
+            className="mt-8 inline-flex items-center rounded-full bg-accent px-6 py-3 text-sm font-semibold text-accent-ink"
           >
-            Back to messages
+            Back to matches
           </Link>
-        </div>
-      )}
-
-      {phase === "error" && (
-        <div className="flex flex-1 flex-col items-center justify-center text-center">
-          <p role="alert" className="text-[15px] leading-relaxed text-muted">
-            {error ?? "Something went wrong. Please try again."}
-          </p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className={`mt-6 w-full rounded-2xl border border-line bg-surface py-3.5 font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-          >
-            Try again
-          </button>
         </div>
       )}
 
       {phase === "ready" && (
         <>
-          <div className="flex-1 space-y-3 overflow-y-auto py-6">
+          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-5">
             {olderCursor && (
               <div className="flex justify-center">
-                <button
-                  type="button"
-                  onClick={() => void loadOlder()}
+                <Button
+                  variant="outline"
+                  className="px-4 py-1.5 text-[13px]"
                   disabled={loadingOlder}
-                  className={`rounded-full border border-line bg-surface px-4 py-2 text-sm font-semibold text-muted shadow-card transition-transform active:scale-[0.98] disabled:opacity-40 ${FOCUS_RING}`}
+                  onClick={() => void loadOlder()}
                 >
-                  {loadingOlder ? "Loading…" : "Load earlier messages"}
-                </button>
+                  {loadingOlder ? "Loading…" : "Earlier messages"}
+                </Button>
               </div>
             )}
 
             {messages.length === 0 && (
-              <p className="pt-8 text-center text-[15px] text-muted">
-                Say hi to {firstName} — this is the start of your conversation.
+              <p className="pt-8 text-center text-[15px] leading-relaxed text-muted">
+                Say hi to {name} — you matched to find a partner for{" "}
+                {reason ?? "an opportunity"}.
               </p>
             )}
 
             {messages.map((message) => (
               <div
                 key={message.id}
-                className={`flex flex-col ${
-                  message.is_own ? "items-end" : "items-start"
-                }`}
+                className={cx(
+                  "animate-fade-in flex flex-col",
+                  message.is_own ? "items-end" : "items-start",
+                )}
               >
                 <p
-                  className={`max-w-[80%] whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed ${
+                  className={cx(
+                    "max-w-[82%] whitespace-pre-wrap break-words px-4 py-2.5 text-[15px] leading-relaxed",
                     message.is_own
-                      ? "bg-accent text-white"
-                      : "border border-line bg-surface text-ink"
-                  }`}
+                      ? "bg-accent text-accent-ink"
+                      : "border border-line bg-surface text-ink",
+                  )}
                 >
                   {message.body}
                 </p>
-                <span className="mt-1 px-1 text-xs text-muted">
-                  {timeLabel(message.created_at)}
+                <span className="mt-1 px-1 text-[11px] text-muted">
+                  {formatMessageTime(message.created_at)}
                 </span>
               </div>
             ))}
@@ -538,13 +504,13 @@ export default function ConversationPage() {
           </div>
 
           {error && (
-            <p role="alert" className="pb-2 text-sm text-muted">
+            <p role="alert" className="px-4 pb-2 text-sm text-danger">
               {error}
             </p>
           )}
 
           <form
-            className="flex items-end gap-2 border-t border-line py-4"
+            className="flex items-end gap-2 border-t border-line px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
             onSubmit={(event) => {
               event.preventDefault();
               void handleSend();
@@ -561,21 +527,16 @@ export default function ConversationPage() {
               }}
               rows={1}
               maxLength={MAX_MESSAGE_LENGTH}
-              aria-label={`Message ${firstName}`}
-              placeholder={`Message ${firstName}`}
-              className="min-h-11 flex-1 resize-none rounded-2xl border border-line bg-surface px-4 py-2.5 text-[15px] text-ink placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              aria-label={`Message ${name}`}
+              placeholder={`Message ${name}`}
+              className="min-h-11 flex-1 resize-none border border-line bg-surface px-4 py-2.5 text-[15px] text-ink placeholder:text-muted/70"
             />
-            <button
-              type="submit"
-              disabled={sending || draft.trim().length === 0}
-              aria-busy={sending}
-              className={`h-11 shrink-0 rounded-2xl bg-accent px-5 font-semibold text-white shadow-card transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
-            >
-              {sending ? "Sending…" : "Send"}
-            </button>
+            <Button type="submit" disabled={sending || draft.trim().length === 0} className="h-11 px-5">
+              {sending ? "…" : "Send"}
+            </Button>
           </form>
         </>
       )}
-    </main>
+    </div>
   );
 }

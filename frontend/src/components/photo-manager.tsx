@@ -11,9 +11,10 @@ import {
   type ReactNode,
 } from "react";
 
+import { Label } from "@/components/ui";
+import { ApiError } from "@/lib/api/http";
 import {
   MAX_PHOTOS,
-  PhotoApiError,
   deletePhoto,
   fetchPhotos,
   reorderPhotos,
@@ -21,6 +22,7 @@ import {
   validatePhotoFile,
   type ProfilePhoto,
 } from "@/lib/api/photos";
+import { cx } from "@/lib/format";
 
 /**
  * Photo management shared by /onboarding (post-profile-creation step) and
@@ -32,14 +34,10 @@ import {
 
 const ACCEPTED_FILES = "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
 
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
 function messageFor(error: unknown): string {
-  if (error instanceof PhotoApiError) {
-    return error.message;
-  }
-  return "Something went wrong. Please try again.";
+  return error instanceof ApiError
+    ? error.message
+    : "Something went wrong. Please try again.";
 }
 
 function Icon({ children, className }: { children: ReactNode; className?: string }) {
@@ -106,7 +104,9 @@ function TrashIcon({ className }: { className?: string }) {
   );
 }
 
-export function PhotoManager() {
+export function PhotoManager({
+  onCountChange,
+}: { onCountChange?: (count: number) => void } = {}) {
   const [phase, setPhase] = useState<"loading" | "ready" | "error">("loading");
   const [photos, setPhotos] = useState<ProfilePhoto[]>([]);
   const [maxPhotos, setMaxPhotos] = useState(MAX_PHOTOS);
@@ -118,6 +118,16 @@ export function PhotoManager() {
   const [dragging, setDragging] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // The parent (onboarding) needs the count to gate "at least one photo". Held
+  // in a ref so an inline callback from the parent can't retrigger this effect.
+  const onCountChangeRef = useRef(onCountChange);
+  useEffect(() => {
+    onCountChangeRef.current = onCountChange;
+  }, [onCountChange]);
+  useEffect(() => {
+    onCountChangeRef.current?.(photos.length);
+  }, [photos.length]);
 
   const loadPhotos = useCallback(async () => {
     const collection = await fetchPhotos();
@@ -279,10 +289,7 @@ export function PhotoManager() {
         <span className="sr-only">Loading your photos</span>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {Array.from({ length: 3 }).map((_, index) => (
-            <div
-              key={index}
-              className="aspect-square animate-pulse rounded-2xl border border-line bg-line/50"
-            />
+            <div key={index} className="aspect-square animate-pulse bg-line" />
           ))}
         </div>
       </div>
@@ -291,8 +298,8 @@ export function PhotoManager() {
 
   if (phase === "error") {
     return (
-      <div className="rounded-card border border-line bg-surface p-5 text-left shadow-card">
-        <p role="alert" className="text-sm font-medium text-red-600">
+      <div className="text-left">
+        <p role="alert" className="text-sm font-medium text-danger">
           {loadError}
         </p>
         <button
@@ -307,7 +314,7 @@ export function PhotoManager() {
                 setPhase("error");
               });
           }}
-          className={`mt-3 rounded-xl px-4 py-2 text-sm font-semibold text-accent transition-colors hover:bg-accent/10 ${FOCUS_RING}`}
+          className="mt-3 rounded-full border border-line px-4 py-2 text-sm font-semibold text-ink transition-colors hover:border-ink"
         >
           Try again
         </button>
@@ -320,15 +327,13 @@ export function PhotoManager() {
   return (
     <div>
       <div className="flex items-baseline justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
-          Your photos
-        </h2>
+        <Label>Your photos</Label>
         <p className="text-xs text-muted" aria-live="polite">
           {photos.length} of {maxPhotos}
         </p>
       </div>
       <p className="mt-2 text-[15px] leading-relaxed text-ink">
-        Your primary photo is the first one people see in Discovery. Tap the{" "}
+        Your primary photo is the first one people see. Tap the{" "}
         <StarIcon className="inline-block size-3.5 -translate-y-px text-accent" />{" "}
         on any photo to make it primary.
       </p>
@@ -339,7 +344,7 @@ export function PhotoManager() {
           return (
             <div
               key={photo.id}
-              className="group relative aspect-square overflow-hidden rounded-2xl border border-line bg-surface shadow-card"
+              className="group relative aspect-square overflow-hidden border border-line bg-surface"
             >
               {photo.url ? (
                 <Image
@@ -355,23 +360,26 @@ export function PhotoManager() {
               )}
 
               {photo.is_primary && (
-                <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white shadow-card">
+                <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-ink">
                   <StarIcon className="size-2.5" />
                   Primary
                 </span>
               )}
 
               <div
-                className={`absolute inset-x-1.5 bottom-1.5 flex items-center justify-center gap-1 rounded-xl bg-surface/95 p-1 shadow-card transition-opacity ${
-                  busy ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-                }`}
+                className={cx(
+                  "absolute inset-x-1.5 bottom-1.5 flex items-center justify-center gap-1 bg-surface/95 p-1 transition-opacity",
+                  busy
+                    ? "opacity-100"
+                    : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
+                )}
               >
                 <button
                   type="button"
                   onClick={() => handleMove(photo.id, -1)}
                   disabled={busy || index === 0}
                   aria-label={`Move photo ${index + 1} earlier`}
-                  className={`grid size-7 place-items-center rounded-lg text-ink transition-colors hover:bg-line/60 disabled:opacity-30 ${FOCUS_RING}`}
+                  className="grid size-7 place-items-center text-ink transition-colors hover:bg-line/60 disabled:opacity-30"
                 >
                   <LeftIcon className="size-4" />
                 </button>
@@ -380,7 +388,7 @@ export function PhotoManager() {
                   onClick={() => handleMakePrimary(photo.id)}
                   disabled={busy || photo.is_primary}
                   aria-label={`Make photo ${index + 1} the primary photo`}
-                  className={`grid size-7 place-items-center rounded-lg text-ink transition-colors hover:bg-line/60 disabled:opacity-30 ${FOCUS_RING}`}
+                  className="grid size-7 place-items-center text-ink transition-colors hover:bg-line/60 disabled:opacity-30"
                 >
                   <StarIcon className="size-3.5" />
                 </button>
@@ -389,7 +397,7 @@ export function PhotoManager() {
                   onClick={() => handleMove(photo.id, 1)}
                   disabled={busy || index === photos.length - 1}
                   aria-label={`Move photo ${index + 1} later`}
-                  className={`grid size-7 place-items-center rounded-lg text-ink transition-colors hover:bg-line/60 disabled:opacity-30 ${FOCUS_RING}`}
+                  className="grid size-7 place-items-center text-ink transition-colors hover:bg-line/60 disabled:opacity-30"
                 >
                   <RightIcon className="size-4" />
                 </button>
@@ -398,7 +406,7 @@ export function PhotoManager() {
                   onClick={() => handleDelete(photo.id)}
                   disabled={busy}
                   aria-label={`Delete photo ${index + 1}`}
-                  className={`grid size-7 place-items-center rounded-lg text-red-600 transition-colors hover:bg-red-50 disabled:opacity-30 ${FOCUS_RING}`}
+                  className="grid size-7 place-items-center text-danger transition-colors hover:bg-line/60 disabled:opacity-30"
                 >
                   <TrashIcon className="size-4" />
                 </button>
@@ -424,13 +432,12 @@ export function PhotoManager() {
             disabled={uploading}
             aria-busy={uploading}
             aria-label="Add a photo"
-            className={`flex aspect-square flex-col items-center justify-center rounded-2xl border-2 border-dashed text-center transition-colors ${
-              FOCUS_RING
-            } ${
+            className={cx(
+              "flex aspect-square flex-col items-center justify-center border-2 border-dashed text-center transition-colors disabled:opacity-40",
               dragging
                 ? "border-accent bg-accent/5"
-                : "border-line bg-surface hover:border-muted/40"
-            } disabled:opacity-40`}
+                : "border-line bg-surface hover:border-muted/40",
+            )}
           >
             <PlusIcon className="size-6 text-muted" />
             <span className="mt-1.5 text-xs font-semibold text-muted">
@@ -451,12 +458,12 @@ export function PhotoManager() {
       />
 
       {fileError && (
-        <p role="alert" className="mt-3 text-sm font-medium text-red-600">
+        <p role="alert" className="mt-3 text-sm font-medium text-danger">
           {fileError}
         </p>
       )}
       {actionError && (
-        <p role="alert" className="mt-3 text-sm font-medium text-red-600">
+        <p role="alert" className="mt-3 text-sm font-medium text-danger">
           {actionError}
         </p>
       )}

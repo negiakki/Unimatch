@@ -1,20 +1,22 @@
 import type { Metadata } from "next";
 
-import { AppHeader } from "@/components/app-header";
+import { AppNav, TAB_BAR_SPACE } from "@/components/app-nav";
 
 import { ProfileEditForm } from "./profile-edit-form";
 
 export const metadata: Metadata = {
-  title: "Edit your profile · UniMatch",
+  title: "Edit your profile",
   description:
-    "Update your UniMatch profile — your photos, studies, bio, and who you're hoping to meet.",
+    "Update the photos, studies, bio, and interests people see across every UniMatch opportunity.",
 };
 
 export default function ProfileEditPage() {
   return (
     <>
-      <AppHeader />
-      <main className="mx-auto w-full max-w-md px-5 pb-16">
+      <AppNav />
+      <main
+        className={`mx-auto w-full max-w-2xl px-5 sm:px-8 ${TAB_BAR_SPACE}`}
+      >
         <ProfileEditForm />
       </main>
     </>

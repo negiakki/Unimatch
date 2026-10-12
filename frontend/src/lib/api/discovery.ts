@@ -1,36 +1,33 @@
 /**
- * API client for the discovery feed endpoint.
+ * Person projections + contextual (opportunity-scoped) people discovery.
  *
- * GET /api/v1/discovery/feed — an ordered, cursor-paginated feed of eligible
- * candidate profiles for the authenticated, VERIFIED viewer.
+ * GET /api/v1/opportunities/{id}/discovery — the eligible people feed for ONE
+ * opportunity. There is deliberately no global profile feed: the opportunity
+ * is always the context for discovering people.
+ *
+ * People arrive as client-safe projections: age (never the raw date of
+ * birth), signed photo URLs (never storage paths), no verification status, and
+ * no legacy dating fields — the backend may still send columns like
+ * relationship intent, and this client simply does not model or render them.
  *
  * Authentication uses the existing Supabase browser session; the JWT is
  * attached as a bearer token and validated by FastAPI. The viewer is derived
- * server-side from the token — this client never sends auth_user_id or
- * viewer profile ids, and the backend never returns them. Candidates arrive
- * as client-safe projections only: age (never the raw date_of_birth),
- * signed photo URLs (never storage paths), and no verification status.
+ * server-side from the token.
  *
- * Query parameters:
- *   * `cursor` — opaque cursor from the previous page's `next_cursor`.
- *   * `limit`  — page size (1–50); omitted uses the backend default.
- *
- * Backend failures arrive as `{ "error": { "code": "...", "message": "..." } }`.
- * Raw backend messages are never surfaced to users — errors are mapped to
- * concise, curated copy by code.
+ * Backend failures arrive as `{ "error": { "code": "...", "message": "..." } }`;
+ * `requestJson` maps them to curated copy and never leaks raw messages.
  */
 
-import { apiBaseUrl } from "@/lib/env";
-import { createClient } from "@/lib/supabase/client";
+import { ApiError, requestJson } from "@/lib/api/http";
 
-export interface DiscoveryPhoto {
+export interface PersonPhoto {
   id: string;
   /** Short-lived signed URL; null when the photo couldn't be signed. */
   url: string | null;
   is_primary: boolean;
 }
 
-export interface DiscoveryUniversity {
+export interface PersonUniversity {
   id: string | null;
   name: string | null;
   city: string | null;
@@ -38,70 +35,59 @@ export interface DiscoveryUniversity {
   country: string | null;
 }
 
-export interface DiscoveryPrompt {
+export interface PersonPrompt {
   prompt: string;
   answer: string;
 }
 
-export interface DiscoveryCandidate {
+/** A person as another student sees them, inside one opportunity's context. */
+export interface Person {
   id: string;
   first_name: string | null;
   /** Derived server-side from date_of_birth — the raw date is never sent. */
   age: number | null;
-  university: DiscoveryUniversity;
+  university: PersonUniversity;
+  /**
+   * The university to display, resolved server-side from the shared candidate
+   * projection: the student's own typed name when their institution isn't in
+   * the catalog, else the catalog name. `university` is always present (and
+   * may be empty) so consumers read this one field instead of re-deriving it.
+   */
+  university_label: string;
   course: string | null;
   academic_year: number | null;
   gender: string | null;
   bio: string | null;
-  relationship_intent: string | null;
-  height_cm: number | null;
   hometown: string | null;
   /** "Why I'm here" — controlled motivation values. */
   motivations: string[];
   /** Merged catalog + custom interests with a source discriminator. */
   interests: { id: string; name: string; source: "catalog" | "custom" }[];
-  profile_prompts: DiscoveryPrompt[];
-  photos: DiscoveryPhoto[];
+  profile_prompts: PersonPrompt[];
+  photos: PersonPhoto[];
 }
 
-export interface DiscoveryFeedPage {
-  candidates: DiscoveryCandidate[];
+export interface PeoplePage {
+  people: Person[];
   next_cursor: string | null;
 }
 
-export type DiscoveryApiErrorCode =
-  | "unauthorized"
-  | "not_verified"
-  | "validation"
-  | "unavailable"
-  | "network"
-  | "unknown";
-
-const USER_MESSAGES: Record<DiscoveryApiErrorCode, string> = {
-  unauthorized: "You need to sign in to use discovery.",
-  not_verified: "You need to be verified to use discovery.",
-  validation: "The discovery feed couldn't be loaded. Please try again.",
-  unavailable:
-    "The discovery feed is temporarily unavailable. Please try again in a moment.",
-  network:
-    "We couldn't reach the server. Check your connection and try again.",
-  unknown: "Something went wrong. Please try again.",
-};
-
-export class DiscoveryApiError extends Error {
-  readonly code: DiscoveryApiErrorCode;
-
-  constructor(code: DiscoveryApiErrorCode) {
-    super(USER_MESSAGES[code]);
-    this.name = "DiscoveryApiError";
-    this.code = code;
-  }
+/** The caller's photo, or null when the backend could not sign it. */
+export function primaryPhotoUrl(person: Person): string | null {
+  const signed = person.photos.filter((photo) => photo.url);
+  return (signed.find((photo) => photo.is_primary) ?? signed[0])?.url ?? null;
 }
 
-export async function fetchDiscoveryFeed(options?: {
-  cursor?: string | null;
-  limit?: number;
-}): Promise<DiscoveryFeedPage> {
+const MESSAGES = {
+  not_verified: "Verify your student status before finding people.",
+  not_applied: "Join this opportunity first, then find your partner.",
+  not_found: "This opportunity is no longer available.",
+} as const;
+
+export async function fetchOpportunityDiscovery(
+  opportunityId: string,
+  options?: { cursor?: string | null; limit?: number },
+): Promise<PeoplePage> {
   const params = new URLSearchParams();
   if (options?.cursor) {
     params.set("cursor", options.cursor);
@@ -110,92 +96,17 @@ export async function fetchDiscoveryFeed(options?: {
     params.set("limit", String(options.limit));
   }
   const query = params.toString();
-  return requestJson<DiscoveryFeedPage>(
-    `/api/v1/discovery/feed${query ? `?${query}` : ""}`,
+  const page = await requestJson<{
+    candidates: Person[];
+    next_cursor: string | null;
+  }>(
+    `/api/v1/opportunities/${encodeURIComponent(opportunityId)}/discovery${
+      query ? `?${query}` : ""
+    }`,
     { method: "GET" },
+    MESSAGES,
   );
+  return { people: page.candidates ?? [], next_cursor: page.next_cursor };
 }
 
-/**
- * Resolves the Supabase access token from the existing browser session.
- * No second auth mechanism is introduced; missing/expired sessions surface
- * as an unauthorized error and the backend re-validates every token.
- */
-async function getAccessToken(): Promise<string | null> {
-  const supabase = createClient();
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? null;
-}
-
-async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
-  const token = await getAccessToken();
-  if (!token) {
-    throw new DiscoveryApiError("unauthorized");
-  }
-
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-
-  let response: Response;
-  try {
-    response = await fetch(`${apiBaseUrl()}${path}`, { ...init, headers });
-  } catch {
-    throw new DiscoveryApiError("network");
-  }
-
-  if (!response.ok) {
-    throw new DiscoveryApiError(
-      errorCodeFor(await readBackendErrorCode(response), response.status),
-    );
-  }
-
-  try {
-    return (await response.json()) as T;
-  } catch {
-    throw new DiscoveryApiError("unknown");
-  }
-}
-
-async function readBackendErrorCode(
-  response: Response,
-): Promise<string | undefined> {
-  try {
-    const body = (await response.json()) as {
-      error?: { code?: unknown };
-    };
-    return typeof body?.error?.code === "string" ? body.error.code : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function errorCodeFor(
-  backendCode: string | undefined,
-  status: number,
-): DiscoveryApiErrorCode {
-  switch (backendCode) {
-    case "unauthorized":
-      return "unauthorized";
-    case "permission_denied":
-      return "not_verified";
-    case "validation_error":
-      return "validation";
-    case "database_unavailable":
-    case "service_unavailable":
-      return "unavailable";
-    default:
-      if (status === 401) {
-        return "unauthorized";
-      }
-      if (status === 403) {
-        return "not_verified";
-      }
-      if (status === 422) {
-        return "validation";
-      }
-      if (status >= 500) {
-        return "unavailable";
-      }
-      return "unknown";
-  }
-}
+export { ApiError };

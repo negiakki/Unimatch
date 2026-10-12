@@ -19,9 +19,13 @@ const display = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "UniMatch",
+  title: {
+    default: "UniMatch — Find your people for whatever you're doing",
+    template: "%s · UniMatch",
+  },
   description:
-    "Dating for university students. Real people, verified students only.",
+    "Find your people for whatever you're doing. Join sports, events, concerts, movie nights and campus life — then meet the people going too. Verified university students only.",
+  applicationName: "UniMatch",
 };
 
 export const viewport: Viewport = {

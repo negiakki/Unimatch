@@ -1,17 +1,23 @@
 import type { Metadata } from "next";
 
+import { AuthShell } from "@/components/auth-shell";
+
 import { LoginForm } from "./login-form";
 
 export const metadata: Metadata = {
-  title: "Sign in · UniMatch",
+  title: "Sign in",
   description:
-    "Sign in to UniMatch to verify your student status and meet verified university students.",
+    "Sign in to UniMatch to browse opportunities and find people to do them with.",
 };
 
 export default function LoginPage() {
   return (
-    <main className="mx-auto w-full max-w-md px-5 pb-16">
+    <AuthShell
+      eyebrow="Welcome back"
+      title="Sign in"
+      lede="Pick up where you left off — the opportunities you joined and the people you're looking for."
+    >
       <LoginForm />
-    </main>
+    </AuthShell>
   );
 }

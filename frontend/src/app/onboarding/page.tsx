@@ -1,17 +1,23 @@
 import type { Metadata } from "next";
 
+import { AuthShell } from "@/components/auth-shell";
+
 import { ProfileOnboardingForm } from "./profile-onboarding-form";
 
 export const metadata: Metadata = {
-  title: "Create your profile · UniMatch",
+  title: "Create your profile",
   description:
-    "Tell UniMatch who you are — your studies, your story, and who you're hoping to meet. Only verified university students can join.",
+    "One profile for everything you do — your studies, your interests, and who you'd like to discover.",
 };
 
 export default function OnboardingPage() {
   return (
-    <main className="mx-auto w-full max-w-md px-5 pb-16">
+    <AuthShell
+      eyebrow="One profile, everything you do"
+      title="Create your profile"
+      lede="The same profile follows you through every opportunity — you never need a separate one for anything you do."
+    >
       <ProfileOnboardingForm />
-    </main>
+    </AuthShell>
   );
 }

@@ -6,13 +6,10 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { PhotoManager } from "@/components/photo-manager";
 import { ProfileFormFields } from "@/components/profile-form-fields";
+import { Button, Label } from "@/components/ui";
+import { ApiError } from "@/lib/api/http";
+import { fetchInterests, type Interest } from "@/lib/api/interests";
 import {
-  fetchInterests,
-  InterestsApiError,
-  type Interest,
-} from "@/lib/api/interests";
-import {
-  ProfileApiError,
   fetchMyProfile,
   fetchUniversities,
   profileFormValuesFromProfile,
@@ -26,21 +23,19 @@ import {
 } from "@/lib/api/profile";
 
 /**
- * Profile editing for the signed-in user's own profile. Loads the profile
- * through GET /profiles/me and saves through PUT /profiles/me; ownership is
- * decided server-side from the session token, and auth_user_id is never
- * displayed or editable. Photo management (upload, reorder, delete, primary)
- * is a separate self-contained section below the profile form.
+ * Profile editing for the signed-in user. Loads through GET /profiles/me and
+ * saves through PUT /profiles/me; ownership is decided server-side from the
+ * session token.
+ *
+ * One universal profile, reused across every opportunity — editing here
+ * changes what people see in every opportunity feed. The legacy relationship
+ * intent column has no control and round-trips untouched.
  */
 
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-
 function messageFor(error: unknown): string {
-  if (error instanceof ProfileApiError || error instanceof InterestsApiError) {
-    return error.message;
-  }
-  return "Something went wrong. Please try again.";
+  return error instanceof ApiError
+    ? error.message
+    : "Something went wrong. Please try again.";
 }
 
 export function ProfileEditForm() {
@@ -108,7 +103,7 @@ export function ProfileEditForm() {
         await Promise.all([loadUniversities(), loadInterests()]);
         setPhase("ready");
       } catch (error) {
-        if (error instanceof ProfileApiError) {
+        if (error instanceof ApiError) {
           if (error.code === "not_found") {
             router.replace("/onboarding");
             return;
@@ -159,7 +154,7 @@ export function ProfileEditForm() {
       setValues(profileFormValuesFromProfile(updated));
       setSaved(true);
     } catch (error) {
-      if (error instanceof ProfileApiError) {
+      if (error instanceof ApiError) {
         if (error.code === "not_found") {
           router.replace("/onboarding");
           return;
@@ -179,36 +174,23 @@ export function ProfileEditForm() {
     return (
       <section className="pt-14" aria-busy="true" aria-live="polite">
         <span className="sr-only">Loading your profile</span>
-        <div className="mx-auto size-14 animate-pulse rounded-2xl bg-line" />
-        <div className="mx-auto mt-5 h-8 w-56 animate-pulse rounded-full bg-line" />
-        <div className="mx-auto mt-3 h-4 w-72 max-w-full animate-pulse rounded-full bg-line" />
-        <div className="mt-8 h-96 rounded-card border border-line bg-surface shadow-card" />
+        <div className="h-10 w-56 animate-pulse bg-line" />
+        <div className="mt-10 h-64 animate-pulse bg-line" />
       </section>
     );
   }
 
   if (phase === "error") {
     return (
-      <section className="pt-14 text-center">
-        <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-accent/15 text-accent">
-          <AlertIcon className="size-7" />
-        </div>
-        <h1 className="mt-5 text-3xl font-bold tracking-tight">
-          Something went wrong
-        </h1>
-        <p
-          role="alert"
-          className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted"
-        >
+      <section className="pt-14">
+        <Label>Problem</Label>
+        <h1 className="type-display mt-4 text-display">Something went wrong</h1>
+        <p role="alert" className="mt-4 max-w-sm text-[15px] leading-relaxed text-muted">
           {loadError}
         </p>
-        <button
-          type="button"
-          onClick={retryLoad}
-          className={`mt-8 w-full rounded-2xl border border-line bg-surface py-3.5 font-semibold text-ink shadow-card transition-transform active:scale-[0.98] ${FOCUS_RING}`}
-        >
+        <Button variant="outline" className="mt-8 w-full" onClick={retryLoad}>
           Try again
-        </button>
+        </Button>
       </section>
     );
   }
@@ -218,28 +200,26 @@ export function ProfileEditForm() {
   }
 
   return (
-    <section className="pt-10 text-center">
+    <section className="pt-10">
       <Link
         href="/profile"
-        className={`inline-flex items-center gap-1 text-sm font-semibold text-accent transition-colors hover:text-accent/80 ${FOCUS_RING}`}
+        className="inline-flex items-center gap-1 text-sm font-semibold text-muted transition-colors hover:text-ink"
       >
         <BackIcon className="size-4" />
-        View your profile
+        Your profile
       </Link>
 
-      <h1 className="mt-4 text-3xl font-bold tracking-tight">Edit your profile</h1>
-      <p className="mx-auto mt-3 max-w-sm text-[15px] leading-relaxed text-muted">
-        Update your photos and details to keep your profile current.
+      <h1 className="type-display mt-4 text-display">Edit your profile</h1>
+      <p className="mt-3 max-w-md text-[15px] leading-relaxed text-muted">
+        One profile, every opportunity — these are what people see wherever
+        they meet you.
       </p>
 
-      <section
-        aria-label="Your photos"
-        className="mt-8 rounded-card border border-line bg-surface p-5 text-left shadow-card"
-      >
+      <section aria-label="Your photos" className="mt-10 border-t border-line pt-6">
         <PhotoManager />
       </section>
 
-      <form onSubmit={handleSubmit} noValidate className="mt-5">
+      <form onSubmit={handleSubmit} noValidate className="mt-10">
         <ProfileFormFields
           values={values}
           errors={fieldErrors}
@@ -254,22 +234,15 @@ export function ProfileEditForm() {
         />
 
         {saved && (
-          <p
-            role="status"
-            aria-live="polite"
-            className="mt-3 text-sm font-medium text-emerald-600"
-          >
+          <p role="status" aria-live="polite" className="mt-6 text-sm font-medium text-positive">
             Profile saved.{" "}
-            <Link
-              href="/profile"
-              className={`font-semibold text-accent underline-offset-2 hover:underline ${FOCUS_RING}`}
-            >
+            <Link href="/profile" className="underline underline-offset-2">
               View your profile
             </Link>
           </p>
         )}
         {submitError && (
-          <p role="alert" className="mt-3 text-sm font-medium text-red-600">
+          <p role="alert" className="mt-6 text-sm font-medium text-danger">
             {submitError}
           </p>
         )}
@@ -277,14 +250,14 @@ export function ProfileEditForm() {
           {submitting ? "Saving your profile" : ""}
         </p>
 
-        <button
+        <Button
           type="submit"
+          className="mt-8 w-full"
           disabled={submitting || universitiesLoading}
           aria-busy={submitting}
-          className={`mt-5 w-full rounded-2xl bg-accent py-3.5 font-semibold text-white shadow-card transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 ${FOCUS_RING}`}
         >
           {submitting ? "Saving changes…" : "Save changes"}
-        </button>
+        </Button>
       </form>
     </section>
   );
@@ -303,25 +276,6 @@ function BackIcon({ className }: { className?: string }) {
       className={className}
     >
       <path d="m15 18-6-6 6-6" />
-    </svg>
-  );
-}
-
-function AlertIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className={className}
-    >
-      <circle cx="12" cy="12" r="10" />
-      <path d="M12 8v4" />
-      <path d="M12 16h.01" />
     </svg>
   );
 }
