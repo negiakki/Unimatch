@@ -1,35 +1,273 @@
 @import "tailwindcss";
 
 /*
- * UniMatch design tokens.
+ * UniMatch design tokens — one identity, contextual category atmospheres.
  *
- * Light/neutral surfaces, dark ink, white cards with subtle borders,
- * restrained coral accent. Fonts are wired to next/font variables
- * (see src/app/layout.tsx).
+ * Strong neutral foundation + a single brand accent + per-category accents.
+ * Type carries the identity: Fraunces (display) against Geist (UI).
+ * Motion is CSS-first; nothing here needs a JS animation library.
  */
+
 :root {
-  --background: #fafaf9; /* page background  */
-  --surface: #ffffff; /* card surface     */
-  --ink: #1c1917; /* primary text     */
-  --muted: #78716c; /* secondary text   */
-  --line: #e7e5e4; /* hairline borders */
-  --accent: #ff6b61; /* coral            */
+  /* Base */
+  --paper: #f4f1ea; /* page */
+  --ink: #0c0c0e; /* primary text, dark bands */
+  --ink-soft: #1a1a1d;
+  --surface: #ffffff;
+  --muted: #6b665e;
+  --line: #dedacf;
+  --line-strong: #c9c4b6;
+
+  /* Brand — one recognizable accent */
+  --accent: #ff4a1c;
+  --accent-ink: #ffffff;
+
+  /* Semantic */
+  --positive: #0f8a5f;
+  --danger: #c0392b;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 140ms;
+  --dur-base: 260ms;
+  --dur-slow: 520ms;
 }
 
-/* Tailwind theme tokens — usable as bg-background, text-ink, etc. */
+/* Category atmospheres — same brand, different mood. Keyed by category slug. */
+[data-category="sports"] {
+  --accent: #00a05a;
+  --accent-ink: #ffffff;
+}
+[data-category="events"] {
+  --accent: #ff4a1c;
+  --accent-ink: #ffffff;
+}
+[data-category="entertainment"] {
+  --accent: #7b4bff;
+  --accent-ink: #ffffff;
+}
+[data-category="social"] {
+  --accent: #ff7a1c;
+  --accent-ink: #1a0d00;
+}
+[data-category="travel"] {
+  --accent: #0e9aa7;
+  --accent-ink: #ffffff;
+}
+[data-category="other"] {
+  --accent: #ff4a1c;
+  --accent-ink: #ffffff;
+}
+
 @theme inline {
-  --color-background: var(--background);
-  --color-surface: var(--surface);
+  --color-paper: var(--paper);
   --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-surface: var(--surface);
   --color-muted: var(--muted);
   --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
   --color-accent: var(--accent);
-  --font-sans: var(--font-sans);
-  --radius-card: 1.25rem;
-  --shadow-card: 0 1px 2px rgb(28 25 23 / 0.06);
+  --color-accent-ink: var(--accent-ink);
+  --color-positive: var(--positive);
+  --color-danger: var(--danger);
+
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-fraunces), ui-serif, Georgia, serif;
+
+  --ease-out-soft: var(--ease-out);
+  --ease-in-out-soft: var(--ease-in-out);
+
+  --text-hero: clamp(3.25rem, 17vw, 13rem);
+  --text-display: clamp(2.5rem, 8vw, 5.5rem);
+  --text-title: clamp(1.75rem, 4.5vw, 3rem);
+  --text-meta: 0.6875rem;
 }
 
 body {
-  background: var(--background);
+  background: var(--paper);
   color: var(--ink);
+  text-rendering: optimizeLegibility;
+}
+
+/*
+ * Focus: one visible, consistent ring everywhere. Never removed, only styled.
+ */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ---------------------------------------------------------------- motion -- */
+
+/* Editorial entrance: content rises and fades as it enters. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 1.75rem, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Image reveal: a clip wipe from the bottom edge. */
+@keyframes wipe-up {
+  from {
+    clip-path: inset(100% 0 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* Line-by-line typography reveal, for the oversized statements. */
+@keyframes line-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 105%, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes marquee {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    /* Track holds two identical runs; -50% loops seamlessly. */
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+@keyframes pulse-ring {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
+@utility animate-rise {
+  animation: rise var(--dur-slow) var(--ease-out) both;
+}
+@utility animate-wipe-up {
+  animation: wipe-up var(--dur-slow) var(--ease-out) both;
+}
+@utility animate-fade-in {
+  animation: fade-in var(--dur-base) var(--ease-out) both;
+}
+/* Per-line typography reveal. Pair with an `overflow-hidden` parent. */
+@utility animate-line-in {
+  animation: line-in var(--dur-slow) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 90ms);
+}
+
+/* Staggered entrances — set `--i` on the child. */
+@utility stagger {
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+@utility marquee-track {
+  animation: marquee var(--marquee-duration, 38s) linear infinite;
+}
+
+/* --------------------------------------------------------------- texture -- */
+
+/*
+ * Grain, drawn once as an inline SVG turbulence. Subtle: 3% opacity. Gives
+ * large flat fields a printed feel without any image asset.
+ */
+@utility grain {
+  position: relative;
+}
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ----------------------------------------------------------------- type -- */
+
+/*
+ * Display type: tight, editorial, optical. Fraunces at heavy weights with
+ * negative tracking reads as a poster line, not a heading.
+ */
+@utility type-display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  line-height: 0.92;
+  letter-spacing: -0.03em;
+  font-variation-settings: "opsz" 120, "SOFT" 0, "WONK" 0;
+}
+
+/* Small uppercase metadata — the editorial "label" voice. */
+@utility type-meta {
+  font-size: var(--text-meta);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+@utility hairline {
+  border-color: var(--line);
+}
+
+/* ------------------------------------------------------------ utilities -- */
+
+@utility tap {
+  /* Comfortable touch target on mobile without changing visual size. */
+  position: relative;
+}
+.tap::after {
+  content: "";
+  position: absolute;
+  inset: 50% 50% 50% 50%;
+  min-width: 44px;
+  min-height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+/* Respect the OS preference: keep opacity feedback, drop movement + loops. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .marquee-track {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  /* Swipe physics must not move anything, but direction still has to read. */
+  [data-swipe-card] {
+    transition: none !important;
+  }
 }
