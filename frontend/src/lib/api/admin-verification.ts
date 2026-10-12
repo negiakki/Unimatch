@@ -37,6 +37,15 @@ export interface AdminStudent {
   course: string | null;
   academic_year: number | null;
   university: AdminUniversity;
+  /** Set when the student named an institution that isn't in the catalog. */
+  custom_university_name: string | null;
+  /**
+   * The university to display: the custom typed name, else the catalog name,
+   * else a placeholder. Resolved server-side so a custom institution is never
+   * rendered as a blank catalog row — the reviewer has to compare it against
+   * the document.
+   */
+  university_label: string;
 }
 
 export interface AdminVerificationItem {
@@ -68,6 +77,7 @@ export type AdminDecisionPayload =
 export type AdminApiErrorCode =
   | "unauthorized"
   | "permission_denied"
+  | "suspended"
   | "not_found"
   | "already_decided"
   | "validation"
@@ -79,6 +89,10 @@ const USER_MESSAGES: Record<AdminApiErrorCode, string> = {
   unauthorized: "You need to sign in to review verification submissions.",
   permission_denied:
     "This area is for staff reviewers only. Your account doesn't have review access.",
+  // A suspended account is read-only everywhere, admin included — say that,
+  // rather than mislabelling it as a permissions problem.
+  suspended:
+    "Your account is suspended, so review decisions can't be recorded.",
   not_found: "This verification submission no longer exists.",
   already_decided:
     "This submission has already been decided, so no further decision is possible.",
@@ -206,6 +220,8 @@ function errorCodeFor(
   switch (backendCode) {
     case "unauthorized":
       return "unauthorized";
+    case "account_suspended":
+      return "suspended";
     case "permission_denied":
       return "permission_denied";
     case "verification_not_found":

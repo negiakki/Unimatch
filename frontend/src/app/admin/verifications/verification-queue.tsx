@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -14,20 +15,32 @@ import {
   fetchVerificationQueue,
   submitVerificationDecision,
   validateRejectionReason,
+  type AdminApiErrorCode,
   type AdminDecisionStatus,
   type AdminVerificationItem,
+  type AdminVerificationStatus,
 } from "@/lib/api/admin-verification";
-
-const FOCUS_RING =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
 const BUTTON_BASE =
   "rounded-2xl px-4 py-2.5 text-sm font-semibold transition-transform active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40";
 
-const ACCENT_BUTTON = `${BUTTON_BASE} bg-accent text-white shadow-card ${FOCUS_RING}`;
-const GHOST_BUTTON = `${BUTTON_BASE} border border-line bg-surface text-ink shadow-card hover:bg-line/40 ${FOCUS_RING}`;
-const REJECT_BUTTON = `${BUTTON_BASE} border border-line bg-surface text-red-600 shadow-card hover:bg-red-50 ${FOCUS_RING}`;
-const REJECT_SOLID_BUTTON = `${BUTTON_BASE} bg-red-600 text-white shadow-card hover:bg-red-700 ${FOCUS_RING}`;
+const ACCENT_BUTTON = `${BUTTON_BASE} bg-accent text-white`;
+const GHOST_BUTTON = `${BUTTON_BASE} border border-line bg-surface text-ink hover:bg-line/40`;
+const REJECT_BUTTON = `${BUTTON_BASE} border border-line bg-surface text-red-600 hover:bg-red-50`;
+const REJECT_SOLID_BUTTON = `${BUTTON_BASE} bg-red-600 text-white hover:bg-red-700`;
+
+/** Reviewer-facing filters, defaulting to the actionable queue. */
+const QUEUE_STATUSES: AdminVerificationStatus[] = [
+  "PENDING",
+  "VERIFIED",
+  "REJECTED",
+];
+
+const STATUS_FILTER_LABELS: Record<AdminVerificationStatus, string> = {
+  PENDING: "Pending",
+  VERIFIED: "Verified",
+  REJECTED: "Rejected",
+};
 
 function formatDate(iso: string): string | null {
   const date = new Date(iso);
@@ -94,35 +107,6 @@ function CheckIcon({ className }: { className?: string }) {
   );
 }
 
-function AlertIcon({ className }: { className?: string }) {
-  return (
-    <Icon className={className}>
-      <circle cx="12" cy="12" r="10" />
-      <path d="M12 8v4" />
-      <path d="M12 16h.01" />
-    </Icon>
-  );
-}
-
-function DocumentIcon({ className }: { className?: string }) {
-  return (
-    <Icon className={className}>
-      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
-      <path d="M14 2v4a2 2 0 0 0 2 2h4" />
-      <path d="M16 13H8" />
-      <path d="M16 17H8" />
-    </Icon>
-  );
-}
-
-function StatusBadge({ children }: { children: ReactNode }) {
-  return (
-    <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-accent/15 text-accent">
-      {children}
-    </div>
-  );
-}
-
 function Field({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
@@ -134,16 +118,17 @@ function Field({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function EmptyQueue() {
+function EmptyQueue({ status }: { status: AdminVerificationStatus }) {
   return (
-    <section className="rounded-card border border-line bg-surface p-8 text-center shadow-card">
-      <span className="mx-auto grid size-12 place-items-center rounded-2xl bg-accent/15 text-accent">
+    <section className="rounded-2xl border border-line bg-surface p-8 text-center">
+      <span className="mx-auto grid size-12 place-items-center rounded-2xl bg-accent/12 text-accent">
         <CheckIcon className="size-6" />
       </span>
       <h2 className="mt-4 text-lg font-bold tracking-tight">All caught up</h2>
       <p className="mx-auto mt-1 max-w-sm text-sm leading-relaxed text-muted">
-        There are no pending verification submissions right now. New
-        submissions will appear here as students upload them.
+        {status === "PENDING"
+          ? "There are no pending verification submissions right now. New submissions will appear here as students upload them."
+          : `No ${STATUS_FILTER_LABELS[status].toLowerCase()} submissions to show.`}
       </p>
     </section>
   );
@@ -154,7 +139,7 @@ function Notice({ children }: { children: ReactNode }) {
     <div
       role="status"
       aria-live="polite"
-      className="flex items-start gap-3 rounded-card border border-line bg-surface p-4 shadow-card"
+      className="flex items-start gap-3 rounded-2xl border border-line bg-surface p-4"
     >
       <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-full bg-emerald-100 text-emerald-700">
         <CheckIcon className="size-4" />
@@ -194,11 +179,17 @@ function VerificationCard({
   const name = student.first_name?.trim() || "Unnamed student";
   const locationParts = [university.city, university.state, university.country]
     .filter((part): part is string => Boolean(part));
-  const universityLine = university.name
-    ? locationParts.length > 0
-      ? `${university.name} · ${locationParts.join(", ")}`
-      : university.name
-    : "University not on file";
+  // A custom university has no catalog row, so its location is empty. The
+  // student's own typed name is what must be compared against the document,
+  // so it renders as the primary line and is flagged as unlisted.
+  const isCustomUniversity = Boolean(student.custom_university_name);
+  const universityLine = isCustomUniversity
+    ? (student.custom_university_name as string)
+    : university.name
+      ? locationParts.length > 0
+        ? `${university.name} · ${locationParts.join(", ")}`
+        : university.name
+      : student.university_label || "University not on file";
   const academicYearLabel =
     student.academic_year == null ? null : `Year ${student.academic_year}`;
   const dobLabel = student.date_of_birth
@@ -274,9 +265,31 @@ function VerificationCard({
   }
 
   let actions: ReactNode;
-  if (confirmingVerify) {
+  // Only an undecided submission can be decided: the backend rejects any
+  // transition out of VERIFIED/REJECTED, so don't offer the controls at all.
+  if (item.status !== "PENDING") {
     actions = (
-      <div className="mt-5 rounded-card border border-line bg-background p-4">
+      <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+        <button
+          type="button"
+          onClick={() => void handleViewDocument()}
+          disabled={busy}
+          className={GHOST_BUTTON}
+        >
+          {documentStatus === "loading"
+            ? "Opening…"
+            : documentStatus === "open"
+              ? "View again"
+              : "View document"}
+        </button>
+        <p className="self-center text-sm text-muted">
+          This submission is already {item.status.toLowerCase()}.
+        </p>
+      </div>
+    );
+  } else if (confirmingVerify) {
+    actions = (
+      <div className="mt-5 rounded-2xl border border-line bg-background p-4">
         <p className="text-sm font-semibold">Verify this submission?</p>
         <p className="mt-1 text-sm text-muted">
           This confirms the student ID is valid. The decision can&apos;t be
@@ -310,7 +323,7 @@ function VerificationCard({
     );
   } else if (rejecting) {
     actions = (
-      <div className="mt-5 rounded-card border border-line bg-background p-4">
+      <div className="mt-5 rounded-2xl border border-line bg-background p-4">
         <label
           htmlFor={`reject-reason-${item.id}`}
           className="text-sm font-semibold"
@@ -328,7 +341,7 @@ function VerificationCard({
           maxLength={MAX_REJECTION_REASON_LENGTH}
           placeholder="Explain why this document can't be accepted"
           disabled={busy}
-          className={`mt-1.5 w-full rounded-2xl border border-line bg-surface px-4 py-3 text-[15px] text-ink shadow-card placeholder:text-muted/60 focus:border-accent disabled:opacity-40 ${FOCUS_RING}`}
+          className={`mt-1.5 w-full rounded-2xl border border-line bg-surface px-4 py-3 text-[15px] text-ink placeholder:text-muted/60 focus:border-accent disabled:opacity-40 `}
         />
         <div className="mt-1 flex items-center justify-between gap-3 text-xs text-muted">
           <span>Shown to the student.</span>
@@ -416,14 +429,21 @@ function VerificationCard({
   }
 
   return (
-    <article className="rounded-card border border-line bg-surface p-5 shadow-card">
+    <article className="rounded-2xl border border-line bg-surface p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-lg font-bold tracking-tight">{name}</h2>
           <p className="mt-0.5 text-sm text-muted">{universityLine}</p>
+          {/* Typed by the student, so it can disagree with the document —
+              that's exactly what the reviewer has to adjudicate. */}
+          {isCustomUniversity && (
+            <p className="mt-1 inline-flex rounded-full border border-line px-2 py-0.5 text-xs font-semibold text-muted">
+              Not in our university list — student entered this name
+            </p>
+          )}
         </div>
-        <span className="shrink-0 rounded-full bg-accent/15 px-3 py-1 text-xs font-semibold text-accent">
-          Pending
+        <span className="shrink-0 rounded-full bg-accent/12 px-3 py-1 text-xs font-semibold text-accent">
+          {STATUS_FILTER_LABELS[item.status]}
         </span>
       </div>
 
@@ -435,10 +455,18 @@ function VerificationCard({
       </dl>
 
       {documentStatus === "open" && (
-        <p className="mt-4 rounded-card bg-accent/10 px-4 py-3 text-sm leading-relaxed text-ink">
+        <p className="mt-4 rounded-2xl bg-accent/12 px-4 py-3 text-sm leading-relaxed text-ink">
           <strong className="font-semibold">Document opened</strong> in a new
-          tab. This secure link expires in {documentExpiresIn ?? 5} minutes —
-          request a fresh link to view it again.
+          tab.{" "}
+          {/* The TTL is the server's configured value from the signed-URL
+              response — never a client-side guess that could drift. */}
+          {documentExpiresIn
+            ? `This secure link expires in ${Math.round(
+                documentExpiresIn / 60,
+              )} minutes`
+            : "This secure link is short-lived"}
+          {" "}
+          — request a fresh link to view it again.
         </p>
       )}
       {documentStatus === "error" && documentError && (
@@ -457,25 +485,44 @@ function VerificationCard({
 }
 
 export function VerificationQueue() {
+  const router = useRouter();
   const [phase, setPhase] = useState<"loading" | "error" | "ready">("loading");
   const [items, setItems] = useState<AdminVerificationItem[]>([]);
   const [queueError, setQueueError] = useState<string | null>(null);
+  const [queueErrorCode, setQueueErrorCode] =
+    useState<AdminApiErrorCode | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [status, setStatus] = useState<AdminVerificationStatus>("PENDING");
+
+  /** A signed-out reviewer must land on sign-in, not a static error panel. */
+  const handleQueueError = useCallback(
+    (error: unknown) => {
+      if (error instanceof AdminApiError && error.code === "unauthorized") {
+        router.replace("/login");
+        return true;
+      }
+      setQueueErrorCode(error instanceof AdminApiError ? error.code : null);
+      setQueueError(messageFor(error));
+      setPhase("error");
+      return false;
+    },
+    [router],
+  );
 
   const loadQueue = useCallback(async () => {
     setQueueError(null);
+    setQueueErrorCode(null);
     setPhase("loading");
     try {
-      const queue = await fetchVerificationQueue("PENDING");
+      const queue = await fetchVerificationQueue(status);
       setItems(queue);
       setPhase("ready");
     } catch (error) {
       console.error("Failed to load the verification queue:", error);
-      setQueueError(messageFor(error));
-      setPhase("error");
+      handleQueueError(error);
     }
-  }, []);
+  }, [status, handleQueueError]);
 
   useEffect(() => {
     void (async () => {
@@ -486,18 +533,18 @@ export function VerificationQueue() {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     setQueueError(null);
+    setQueueErrorCode(null);
     try {
-      const queue = await fetchVerificationQueue("PENDING");
+      const queue = await fetchVerificationQueue(status);
       setItems(queue);
       setPhase("ready");
     } catch (error) {
       console.error("Failed to refresh the verification queue:", error);
-      setQueueError(messageFor(error));
-      setPhase("error");
+      handleQueueError(error);
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [status, handleQueueError]);
 
   const flash = useCallback((message: string) => {
     setNotice(message);
@@ -538,34 +585,37 @@ export function VerificationQueue() {
         {[0, 1, 2].map((index) => (
           <div
             key={index}
-            className="h-44 animate-pulse rounded-card border border-line bg-surface shadow-card"
+            className="h-44 animate-pulse rounded-2xl border border-line bg-surface"
           />
         ))}
       </section>
     );
   } else if (phase === "error") {
     body = (
-      <section className="mt-8 rounded-card border border-line bg-surface p-6 text-center shadow-card">
-        <StatusBadge>
-          <AlertIcon className="size-7" />
-        </StatusBadge>
-        <h2 className="mt-4 text-xl font-bold tracking-tight">
-          Couldn&apos;t load the queue
+      <section className="mt-8 rounded-2xl border border-line bg-surface p-6">
+        <h2 className="text-xl font-bold tracking-tight">
+          {queueErrorCode === "permission_denied"
+            ? "Reviewer access required"
+            : queueErrorCode === "suspended"
+              ? "Account suspended"
+              : "Couldn't load the queue"}
         </h2>
-        <p
-          role="alert"
-          className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted"
-        >
+        <p role="alert" className="mt-2 text-sm leading-relaxed text-muted">
           {queueError}
         </p>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          disabled={refreshing}
-          className={`mt-6 ${GHOST_BUTTON}`}
-        >
-          {refreshing ? "Loading…" : "Try again"}
-        </button>
+        {/* Retrying can't fix an authorization or suspension problem, so don't
+            offer it for those. */}
+        {queueErrorCode !== "permission_denied" &&
+          queueErrorCode !== "suspended" && (
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              disabled={refreshing}
+              className={`mt-6 ${GHOST_BUTTON}`}
+            >
+              {refreshing ? "Loading…" : "Try again"}
+            </button>
+          )}
       </section>
     );
   } else {
@@ -574,7 +624,7 @@ export function VerificationQueue() {
         {notice && <Notice>{notice}</Notice>}
         <section aria-live="polite" className="mt-6 space-y-4">
           {items.length === 0 ? (
-            <EmptyQueue />
+            <EmptyQueue status={status} />
           ) : (
             items.map((item) => (
               <VerificationCard
@@ -591,18 +641,40 @@ export function VerificationQueue() {
   }
 
   return (
-    <div>
-      <header className="pt-12 text-center">
-        <StatusBadge>
-          <DocumentIcon className="size-7" />
-        </StatusBadge>
-        <h1 className="mt-5 text-3xl font-bold tracking-tight">
+    <div className="mx-auto w-full max-w-3xl">
+      <header className="border-b border-line pb-5">
+        <span className="type-meta text-muted">People &amp; Verification</span>
+        <h1 className="type-display mt-3 text-[clamp(2rem,6vw,3rem)]">
           Verification queue
         </h1>
-        <p className="mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-muted">
-          Review pending student ID submissions. Documents stay private and are
-          shown only to staff reviewers.
+        <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-muted">
+          Review student ID submissions. Documents stay private and are shown
+          only to staff reviewers.
         </p>
+
+        {/* Real status filter — the backend already scopes by `status`. */}
+        <div
+          role="tablist"
+          aria-label="Filter submissions by status"
+          className="mt-6 inline-flex gap-1 rounded-full border border-line bg-surface p-1"
+        >
+          {QUEUE_STATUSES.map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="tab"
+              aria-selected={status === option}
+              onClick={() => setStatus(option)}
+              className={
+                status === option
+                  ? `${BUTTON_BASE} bg-accent text-accent-ink`
+                  : `${BUTTON_BASE} text-muted hover:text-ink`
+              }
+            >
+              {STATUS_FILTER_LABELS[option]}
+            </button>
+          ))}
+        </div>
         {phase === "ready" && (
           <button
             type="button"

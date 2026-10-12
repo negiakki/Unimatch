@@ -9,9 +9,5 @@ export const metadata: Metadata = {
 };
 
 export default function AdminVerificationsPage() {
-  return (
-    <main className="mx-auto w-full max-w-3xl px-5 pb-16">
-      <VerificationQueue />
-    </main>
-  );
+  return <VerificationQueue />;
 }
