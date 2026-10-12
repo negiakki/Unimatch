@@ -16,8 +16,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
+from app.core.config import get_settings
 from app.main import create_app
 from app.services.supabase import get_supabase_service_client
 
@@ -421,8 +423,42 @@ class FakeSupabase:
         return FakeStorage(self.state)
 
 
-def make_client(fake: FakeSupabase) -> TestClient:
+def _registered_paths(routes) -> set[str]:
+    """Every route path the app already serves, flattened through inclusions.
+
+    FastAPI keeps an included router as a wrapper, so the mounted paths are
+    reached through `original_router`.
+    """
+    paths: set[str] = set()
+    pending = list(routes)
+    while pending:
+        route = pending.pop()
+        path = getattr(route, "path", None)
+        if path is not None:
+            paths.add(path)
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            pending.extend(inner.routes)
+    return paths
+
+
+def make_client(fake: FakeSupabase, *extra_routers: APIRouter) -> TestClient:
+    """Build a TestClient over the service-client double.
+
+    `extra_routers` mount routers the application's own `api_router` does not
+    serve yet: the production registration lives in `app.api.routes.router`,
+    and a test targeting a router that is not registered there passes it
+    explicitly so the router module itself is exercised without waiting for
+    the central registration. A router that is already registered is skipped,
+    so passing one never registers a duplicate path.
+    """
     app = create_app()
+    if extra_routers:
+        served = _registered_paths(app.routes)
+        for router in extra_routers:
+            if any(getattr(r, "path", None) in served for r in router.routes):
+                continue
+            app.include_router(router, prefix=get_settings().api_v1_prefix)
     app.dependency_overrides[get_supabase_service_client] = lambda: fake
     return TestClient(app)
 
