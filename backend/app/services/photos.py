@@ -12,6 +12,8 @@ short-lived signed URLs generated server-side.
 Application-level rules (deliberately not database constraints — see
 docs/DATABASE.md):
   * at most MAX_PHOTOS (6) photos per profile (PRD 1-6 bounds);
+  * at least MIN_PHOTOS (1) before a verification submission is accepted
+    (`enforce_minimum_photos`);
   * the primary photo is the photo at the lowest position; `is_primary`
     is re-derived from `position` on every mutation of this module.
 
@@ -37,9 +39,11 @@ from app.core.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-# Product rule from the PRD: minimum 1 / maximum 6 photos. The minimum is a
-# discovery-era gate (not this slice); the maximum is enforced here.
+# Product rule from the PRD: minimum 1 / maximum 6 photos. The maximum is
+# enforced on upload; the minimum is a prerequisite enforced where it is
+# needed — student-verification submission (see `enforce_minimum_photos`).
 MAX_PHOTOS = 6
+MIN_PHOTOS = 1
 
 ALLOWED_CONTENT_TYPES: dict[str, str] = {
     "image/jpeg": "jpg",
@@ -148,6 +152,21 @@ def enforce_photo_limit(existing_count: int) -> None:
         raise ConflictError(
             f"You can have at most {MAX_PHOTOS} photos. Delete one first.",
             code="photo_limit_reached",
+        )
+
+
+def enforce_minimum_photos(existing_count: int) -> None:
+    """PRD minimum: at least one photo before verification can be submitted.
+
+    The frontend already blocks this during onboarding, but that gate is
+    cosmetic — a direct API call bypasses it, so the rule is enforced here at
+    the verification submission boundary (the caller passes the photo count it
+    already loaded, so no extra query is needed).
+    """
+    if existing_count < MIN_PHOTOS:
+        raise BadRequestError(
+            "Add at least one profile photo before submitting your student ID.",
+            code="photo_required",
         )
 
 

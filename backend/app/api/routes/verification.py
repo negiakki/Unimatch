@@ -6,6 +6,10 @@ review. GET /api/v1/verification/status — the caller's own verification state.
 Documents are stored in the private `verification-documents` bucket under
 `<auth.uid()>/<random-file-id>.<extension>`; PostgreSQL stores the object
 reference only. Ownership comes exclusively from the authenticated identity.
+
+Submitting requires a profile with at least one photo: the client-side
+onboarding gate is advisory, so the rule is re-checked here against the
+caller's own photo rows before any document is stored.
 """
 
 import logging
@@ -15,6 +19,7 @@ from fastapi import APIRouter, File, UploadFile
 
 from app.api.deps import CurrentAuthUserDep, SettingsDep, SupabaseDep
 from app.core.exceptions import PayloadTooLargeError
+from app.services import photos as photos_service
 from app.services import verification as verification_service
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,12 @@ def submit_verification_document(
     profile_id = verification_service.get_profile_id(supabase, auth_user_id)
     verification_service.enforce_submission_rules(
         verification_service.get_existing_statuses(supabase, profile_id)
+    )
+    # PRD minimum: at least one profile photo. The onboarding wizard enforces
+    # this in the UI, but the client can skip onboarding entirely, so the rule
+    # is enforced server-side before anything is stored.
+    photos_service.enforce_minimum_photos(
+        len(photos_service.list_photos(supabase, profile_id))
     )
 
     bucket = settings.verification_bucket_name

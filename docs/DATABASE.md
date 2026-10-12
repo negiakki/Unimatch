@@ -239,7 +239,9 @@ supabase db lint     # optional static checks
 - **Photo count and primary-photo invariant.** The PRD's 1–6 photo bounds
   and "primary = lowest position" are product rules enforced by the
   photo-management slice **in the backend service layer** (max count on
-  upload; `is_primary` re-derived from `position` on every mutation). The
+  upload; min count of 1 required before a verification submission is
+  accepted, `photo_required`; `is_primary` re-derived from `position` on every
+  mutation). The
   database guarantees at most one primary per profile and unique ordering
   (`UNIQUE (profile_id, position)`, partial unique index on `is_primary`);
   the cross-row invariants are deliberately not database triggers.

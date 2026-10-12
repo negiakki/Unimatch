@@ -215,7 +215,7 @@ User-facing:
 
 | Area | Endpoint sketch | Notes |
 | --- | --- | --- |
-| Submit student ID | `POST /verifications` | Upload to private bucket + create `PENDING` record |
+| Submit student ID | `POST /verifications` | Upload to private bucket + create `PENDING` record. Requires an existing profile with **at least one** profile photo (`photo_required`, 400) — the onboarding gate is client-side, so the minimum is re-checked server-side before anything is stored |
 | My verification status/history | `GET /verifications/me` | Includes rejection reason if `REJECTED` |
 
 Reviewer-facing (staff authorization required — see "Admin (reviewer)"):

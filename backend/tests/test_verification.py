@@ -181,10 +181,21 @@ class FakeSupabase:
 # ---------------------------------------------------------------------------
 
 
+def photo_row(profile_id=STUDENT_PROFILE_ID, position=1, is_primary=True):
+    return {
+        "id": str(uuid4()),
+        "profile_id": str(profile_id),
+        "storage_path": f"{STUDENT_AUTH_ID}/{uuid_module.uuid4().hex}.png",
+        "position": position,
+        "is_primary": is_primary,
+    }
+
+
 def make_fake(
     *,
     submissions=None,
     profiles=None,
+    photos=None,
     fail_upload_with=None,
     fail_insert_with=None,
 ):
@@ -200,6 +211,13 @@ def make_fake(
             {"id": str(STUDENT_PROFILE_ID), "auth_user_id": str(STUDENT_AUTH_ID)},
             {"id": str(OTHER_PROFILE_ID), "auth_user_id": str(OTHER_AUTH_ID)},
         ]
+    )
+    # Verification submission requires at least one profile photo (PRD
+    # minimum); the default fixture is a profile-complete student.
+    fake.tables["profile_photos"] = (
+        photos
+        if photos is not None
+        else [photo_row(STUDENT_PROFILE_ID), photo_row(OTHER_PROFILE_ID)]
     )
     fake.tables["verification_submissions"] = list(submissions or [])
     return fake
@@ -253,6 +271,66 @@ def fake():
 @pytest.fixture()
 def client(fake):
     return make_client(fake)
+
+
+# ---------------------------------------------------------------------------
+# 0. Multipart transport contract.
+#
+# Regression guard for a real production bug: the frontend's shared
+# requestJson() set `Content-Type: application/json` on FormData bodies, which
+# suppressed the browser's `multipart/form-data; boundary=...`. Both uploads
+# (student ID and profile photo) silently failed to parse. These tests pin the
+# API side of that contract: multipart is the ONLY accepted encoding, so a
+# future regression on the client cannot hide behind a permissive endpoint.
+# ---------------------------------------------------------------------------
+
+
+def test_submit_accepts_a_real_multipart_body(client, fake):
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        files={"file": ("id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["status"] == "PENDING"
+    # Exactly one stored object and one row: the body was really parsed.
+    assert len(fake.state["objects"]) == 1
+    assert len(fake.tables["verification_submissions"]) == 1
+
+
+def test_submit_rejects_a_multipart_body_mislabelled_as_json(client, fake):
+    """What the buggy client actually sent: multipart payload, JSON header.
+
+    FastAPI cannot parse an UploadFile out of a JSON-typed body, so this must
+    fail rather than half-succeed and leave an orphan object behind.
+    """
+    boundary = "----unimatchtest"
+    parts = [
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="file"; filename="id.png"\r\n',
+        b"Content-Type: image/png\r\n\r\n",
+        png_bytes(),
+        f"\r\n--{boundary}--\r\n".encode(),
+    ]
+
+    resp = client.post(
+        f"{API}/submit",
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        content=b"".join(parts),
+    )
+
+    assert resp.status_code == 422
+    assert not fake.state["objects"]
+    assert fake.tables["verification_submissions"] == []
+
+
+def test_status_requires_no_body(client, fake):
+    resp = client.get(f"{API}/status", headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"verification_status": None, "submission": None}
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +881,138 @@ def test_cleanup_never_touches_other_submissions_documents():
     assert resp.json()["error"]["code"] == "pending_submission_exists"
     assert existing_path in fake.state["objects"]
     assert existing_path not in fake.state["removed"]
+
+
+# ---------------------------------------------------------------------------
+# 15. Server-side photo requirement.
+#
+# Onboarding requires a photo in the UI, but the client can skip onboarding
+# and POST /verification/submit directly. The PRD minimum (>= 1 profile photo)
+# is therefore enforced at this boundary, using the caller's own photo rows.
+# ---------------------------------------------------------------------------
+
+
+def test_profile_complete_user_with_a_photo_can_submit():
+    fake = make_fake(photos=[photo_row()])
+    client = make_client(fake)
+
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        files={"file": ("id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["status"] == "PENDING"
+    assert len(fake.tables["verification_submissions"]) == 1
+
+
+def test_user_with_zero_photos_cannot_submit():
+    fake = make_fake(photos=[])
+    client = make_client(fake)
+
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        files={"file": ("id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "photo_required"
+    # Rejected before any object is stored or any row is written.
+    assert not fake.state["objects"]
+    assert fake.tables["verification_submissions"] == []
+
+
+def test_photo_requirement_holds_when_the_client_skips_onboarding():
+    """Direct API call with a fully valid document but no photos.
+
+    The request carries every field a profile-complete client would send, so
+    nothing about the request can signal that onboarding was completed — the
+    photo rows are the only source of truth.
+    """
+    fake = make_fake(photos=[])
+    client = make_client(fake)
+
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        data={"onboarding_complete": "true", "profile_id": str(STUDENT_PROFILE_ID)},
+        files={"file": ("student-id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "photo_required"
+    assert not fake.state["objects"]
+    assert fake.tables["verification_submissions"] == []
+
+
+def test_other_users_photos_do_not_satisfy_the_requirement():
+    fake = make_fake(photos=[photo_row(OTHER_PROFILE_ID)])
+    client = make_client(fake)
+
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        files={"file": ("id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "photo_required"
+
+
+def test_photo_requirement_does_not_weaken_existing_submission_rules():
+    """A verified user with a photo still gets 409, not the photo error."""
+    fake = make_fake(
+        photos=[photo_row()],
+        submissions=[submission_row("VERIFIED", "2026-08-20T10:00:00+00:00")],
+    )
+    client = make_client(fake)
+
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        files={"file": ("id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "already_verified"
+
+
+def test_pending_submission_still_wins_over_the_photo_check_for_a_photoless_user():
+    fake = make_fake(
+        photos=[],
+        submissions=[submission_row("PENDING", "2026-08-28T10:00:00+00:00")],
+    )
+    client = make_client(fake)
+
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        files={"file": ("id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "pending_submission_exists"
+
+
+def test_rejected_user_with_a_photo_can_resubmit():
+    fake = make_fake(
+        photos=[photo_row()],
+        submissions=[
+            submission_row("REJECTED", "2026-08-20T10:00:00+00:00"),
+        ],
+    )
+    client = make_client(fake)
+
+    resp = client.post(
+        f"{API}/submit",
+        headers=AUTH_HEADERS,
+        files={"file": ("id.png", png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["status"] == "PENDING"
 
 
 # ---------------------------------------------------------------------------

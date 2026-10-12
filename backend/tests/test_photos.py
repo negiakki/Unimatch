@@ -309,6 +309,45 @@ def upload(client, name="photo.png", payload=None, content_type="image/png", hea
 
 
 # ---------------------------------------------------------------------------
+# 0. Multipart transport contract (regression guard).
+#
+# The frontend's shared requestJson() once set `Content-Type:
+# application/json` on FormData, suppressing the multipart boundary and
+# breaking this upload the same way it broke the student ID upload. Pin the
+# API side so the failure can never be silently absorbed.
+# ---------------------------------------------------------------------------
+
+
+def test_upload_accepts_a_real_multipart_body(client, fake):
+    resp = upload(client)
+
+    assert resp.status_code == 201
+    # Client-safe: a short-lived signed url, never the storage_path.
+    assert set(resp.json().keys()) == {"id", "position", "is_primary", "url"}
+    assert len(fake.state["objects"]) == 1
+
+
+def test_upload_rejects_a_multipart_body_mislabelled_as_json(client, fake):
+    boundary = "----unimatchtest"
+    parts = [
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="file"; filename="photo.png"\r\n',
+        b"Content-Type: image/png\r\n\r\n",
+        png_bytes(),
+        f"\r\n--{boundary}--\r\n".encode(),
+    ]
+
+    resp = client.post(
+        API,
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+        content=b"".join(parts),
+    )
+
+    assert resp.status_code == 422
+    assert not fake.state["objects"]
+
+
+# ---------------------------------------------------------------------------
 # 1. Unauthenticated requests rejected.
 # ---------------------------------------------------------------------------
 
