@@ -227,6 +227,7 @@ class FakeSupabase:
             "interests": [],
             "profile_interests": [],
             "custom_interests": [],
+            "suspensions": [],
         }
         self._fail_insert_with = fail_insert_with
         self._users_by_token = users_by_token

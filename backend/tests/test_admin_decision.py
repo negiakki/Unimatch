@@ -177,6 +177,14 @@ def make_fake(*, submissions=None, staff_ids=None, fail_tables=()):
         ],
         "verification_submissions": list(submissions or []),
         "verification_reviews": [],
+        # Admin routes pass through the shared suspension gate like every other
+        # authenticated route, so the double has to answer its two lookups.
+        # Empty = no active suspension, i.e. these callers are not suspended.
+        "profiles": [
+            {"id": str(uuid4()), "auth_user_id": str(STAFF_AUTH_ID)},
+            {"id": str(uuid4()), "auth_user_id": str(STUDENT_AUTH_ID)},
+        ],
+        "suspensions": [],
     }
     return FakeSupabase(tables, set(fail_tables))
 

@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.services.supabase import get_supabase_service_client
 
+from tests.fakes import matches_or_filter
+
 API = "/api/v1/profiles"
 UNIVERSITIES_API = "/api/v1/universities"
 
@@ -109,6 +111,7 @@ class FakeTable:
         self._fail_insert_with = fail_insert_with
         self._filters: dict = {}
         self._in_filters: dict = {}
+        self._or_filters: list = []
         self._single = False
         self._order = None
         self._insert_payload = None
@@ -124,6 +127,10 @@ class FakeTable:
 
     def in_(self, column, values):
         self._in_filters[column] = list(values)
+        return self
+
+    def or_(self, expr):
+        self._or_filters.append(expr)
         return self
 
     def order(self, column):
@@ -152,6 +159,7 @@ class FakeTable:
             for row in self._tables[self._table_name]
             if all(row.get(c) == v for c, v in self._filters.items())
             and all(row.get(c) in v for c, v in self._in_filters.items())
+            and all(matches_or_filter(row, e) for e in self._or_filters)
         ]
 
     def execute(self):
@@ -204,6 +212,7 @@ class FakeSupabase:
             "interests": [],
             "profile_interests": [],
             "custom_interests": [],
+            "suspensions": [],
         }
         self._fail_insert_with = fail_insert_with
         self._users_by_token = users_by_token

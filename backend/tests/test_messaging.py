@@ -26,6 +26,8 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.services.supabase import get_supabase_service_client
 
+from tests.fakes import matches_or_filter
+
 CONVERSATIONS_API = "/api/v1/conversations"
 
 VIEWER_AUTH_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -114,10 +116,7 @@ class FakeTable:
         return self
 
     def or_(self, expr):
-        # Supports "col.eq.v,col.eq.v" and the keyset form
-        # "created_at.lt.v,and(created_at.eq.v,id.lt.v)" (top-level commas
-        # respect parentheses).
-        self._or_filters.extend(_parse_or(expr))
+        self._or_filters.append(expr)
         return self
 
     def order(self, column, desc=False):
@@ -144,7 +143,7 @@ class FakeTable:
         ):
             return False
         if self._or_filters and not any(
-            _row_satisfies_conditions(row, group) for group in self._or_filters
+            matches_or_filter(row, expr) for expr in self._or_filters
         ):
             return False
         return True
@@ -183,55 +182,6 @@ class FakeTable:
         return FakeResponse(matched)
 
 
-def _split_top_level(expr: str) -> list[str]:
-    parts, depth, current = [], 0, ""
-    for char in expr:
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-        if char == "," and depth == 0:
-            parts.append(current)
-            current = ""
-        else:
-            current += char
-    if current:
-        parts.append(current)
-    return [p.strip() for p in parts if p.strip()]
-
-
-def _parse_or(expr: str) -> list[list[tuple[str, str, str]]]:
-    """Parse an or_ expression into OR-alternatives of AND-conditions."""
-    alternatives = []
-    for part in _split_top_level(expr):
-        if part.startswith("and(") and part.endswith(")"):
-            conditions = [_parse_condition(c) for c in _split_top_level(part[4:-1])]
-        else:
-            conditions = [_parse_condition(part)]
-        alternatives.append(conditions)
-    return alternatives
-
-
-def _parse_condition(condition: str) -> tuple[str, str, str]:
-    column, op, value = condition.split(".", 2)
-    return column, op, value
-
-
-def _compare(left, op: str, right) -> bool:
-    if op == "eq":
-        return str(left) == str(right)
-    if op == "lt":
-        return str(left) < str(right)
-    if op == "gt":
-        return str(left) > str(right)
-    raise AssertionError(f"unexpected operator in test double: {op}")
-
-
-def _row_satisfies_conditions(row, conditions) -> bool:
-    return all(
-        _compare(row.get(column), op, value)
-        for column, op, value in conditions
-    )
 
 
 class FakeSupabase:
@@ -247,6 +197,7 @@ class FakeSupabase:
             "matches": [],
             "messages": [],
             "blocks": [],
+            "suspensions": [],
         }
         self._fail_tables = set(fail_tables)
         self._users_by_token = users_by_token
@@ -776,6 +727,58 @@ def test_send_message_failure_is_503(client, fake):
     assert resp.json()["error"]["code"] in {"database_insert_failed", "database_unavailable"}
     # Nothing was half-written.
     assert fake.tables["messages"] == []
+
+
+def test_suspended_viewer_cannot_send_a_message(client, fake):
+    """End-to-end suspension enforcement on the one surface that writes through
+    a Postgres RPC rather than a table insert: the gate must reject the send
+    with 403 account_suspended before the handler runs, so the message is never
+    written and the unread counters never move.
+
+    The active send first is a positive control — without it, "no message was
+    persisted" would also pass if this fixture could never send at all."""
+    assert send(client, "before the suspension").status_code == 201
+    assert len(fake.tables["messages"]) == 1
+    unread_before = fake.tables["matches"][0]["user_b_unread_count"]
+
+    fake.tables["suspensions"].append(
+        {
+            "id": str(uuid4()),
+            "profile_id": str(VIEWER_PROFILE_ID),
+            "reason": "harassment",
+            "suspended_until": None,  # indefinite
+            "created_by": str(THIRD_AUTH_ID),
+            "created_at": "2026-08-30T09:00:00+00:00",
+        }
+    )
+
+    resp = send(client, "after the suspension")
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "account_suspended"
+
+    # The rejected message did not reach storage, and the atomic RPC never ran.
+    assert [m["body"] for m in fake.tables["messages"]] == ["before the suspension"]
+    assert fake.tables["matches"][0]["user_b_unread_count"] == unread_before
+
+
+def test_expired_suspension_allows_sending_again(client, fake):
+    """The gate keys off an ACTIVE suspension, so a lapsed timed suspension
+    stops blocking sends on its own — no manual reinstatement."""
+    fake.tables["suspensions"].append(
+        {
+            "id": str(uuid4()),
+            "profile_id": str(VIEWER_PROFILE_ID),
+            "reason": "harassment",
+            "suspended_until": (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).isoformat(),
+            "created_by": str(THIRD_AUTH_ID),
+            "created_at": "2026-08-30T09:00:00+00:00",
+        }
+    )
+
+    assert send(client, "still allowed").status_code == 201
+    assert [m["body"] for m in fake.tables["messages"]] == ["still allowed"]
 
 
 # ---------------------------------------------------------------------------

@@ -247,6 +247,7 @@ class FakeSupabase:
             "blocks": [],
             "reports": [],
             "staff_admins": [],
+            "suspensions": [],
         }
         self._fail_tables = set(fail_tables)
         self._users_by_token = users_by_token
