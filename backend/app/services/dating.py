@@ -1,9 +1,17 @@
-"""Likes, passes and matches business logic (Phase 6).
+"""Likes, passes, interests & matches business logic (Phase 6) + contextual
+opportunity-scoped actions (Phase 2).
 
-POST /api/v1/discovery/{profile_id}/like and /pass record one immutable
-action per (viewer, candidate) pair; a mutual LIKE creates the canonical
-match exactly once. GET /api/v1/matches lists active matches; DELETE
-/api/v1/matches/{match_id} soft-unmatches (unmatched_at) for participants.
+POST /api/v1/discovery/{profile_id}/like and /pass record one immutable action
+per (viewer, candidate) pair; a mutual LIKE creates the canonical match exactly
+once. GET /api/v1/matches lists active matches; DELETE /api/v1/matches/{match_id}
+soft-unmatches (unmatched_at) for participants.
+
+The Phase 2 contextual variants (`like_in_opportunity`, `pass_in_opportunity`)
+scope actions AND the resulting matches to an opportunity: the same two users
+can act and match independently through different opportunities, and no match
+or action from one opportunity ever leaks into another's discovery/matching
+context. The partial unique (actor, target, opportunity) / (pair, opportunity)
+indexes are the concurrency arbiters.
 
 Security model (mirrors the discovery slice):
   * Identity derives exclusively from the Supabase bearer token — the actor
@@ -12,16 +20,18 @@ Security model (mirrors the discovery slice):
   * The viewer must be VERIFIED (403 otherwise, reusing the discovery gate).
   * The target must exist and be VERIFIED (404 otherwise — no existence
     leak; self-actions surface the same 404).
-  * An already-decided target (any prior action by the viewer, or a duplicate
-    insert under concurrency) is a 409 `already_decided`. A LIKE after PASS
-    or a PASS after LIKE is the same unique pair — rejected identically.
+  * An already-decided target (any prior action by the viewer within the
+    SAME opportunity, or a duplicate insert under concurrency) is a 409
+    `already_decided`. A LIKE after PASS or a PASS after LIKE is the same
+    unique (actor, target, opportunity) slot — rejected identically.
   * Incoming actions are never read and never returned ("who liked you" does
     not exist in v1).
 
 Match creation is atomic-by-constraint: the service role inserts the match
 with the canonical (user_a_id < user_b_id) pair ordering using
-`ignore_duplicates`; the UNIQUE(user_a_id, user_b_id) constraint guarantees
-concurrent mutual likes converge on exactly one match row.
+`ignore_duplicates`; the partial UNIQUE(user_a_id, user_b_id, opportunity_id)
+constraint guarantees concurrent mutual likes converge on exactly one match
+row per opportunity.
 """
 
 import logging
@@ -45,8 +55,14 @@ from app.services.discovery import (
     _photos_by_profile,
     _candidate_payload,
 )
+from app.services.opportunities import require_published_opportunity
 
 logger = logging.getLogger(__name__)
+
+_OPPORTUNITY_CONTEXT_COLUMNS = (
+    "id,title,category_id,activity_id,"
+    "categories(id,name,slug,icon),activities(id,name,slug)"
+)
 
 
 def like_candidate(
@@ -96,6 +112,333 @@ def pass_candidate(supabase: Client, auth_user_id: UUID, target_profile_id: UUID
     return {"outcome": "pass_recorded"}
 
 
+# ---------------------------------------------------------------------------
+# Contextual (opportunity-scoped) actions.
+# ---------------------------------------------------------------------------
+
+
+def like_in_opportunity(
+    supabase: Client,
+    auth_user_id: UUID,
+    target_profile_id: UUID,
+    opportunity_id: UUID,
+    *,
+    bucket: str,
+    signed_url_ttl: int,
+) -> dict[str, Any]:
+    """Record the viewer's INTEREST (LIKE) within an opportunity.
+
+    The opportunity must be PUBLISHED (404 otherwise — no existence leak for
+    the rest). A mutual LIKE within the SAME opportunity creates the match,
+    scoped to that opportunity: the same pair may match independently through
+    a different opportunity, and this match never appears in another
+    opportunity's context.
+    """
+    viewer = _verified_viewer(supabase, auth_user_id)
+    require_published_opportunity(supabase, opportunity_id)
+    target = _eligible_opportunity_target(
+        supabase, target_profile_id, viewer["id"], opportunity_id
+    )
+
+    _reject_if_already_decided(
+        supabase, viewer["id"], str(target["id"]), opportunity_id=str(opportunity_id)
+    )
+    _insert_action(
+        supabase, viewer["id"], str(target["id"]), "LIKE", opportunity_id=str(opportunity_id)
+    )
+
+    reverse = _find_like(
+        supabase,
+        actor=str(target["id"]),
+        target=viewer["id"],
+        opportunity_id=str(opportunity_id),
+    )
+    if not reverse:
+        return {"outcome": "interest_recorded"}
+
+    match = _create_match_once(
+        supabase, viewer["id"], str(target["id"]), opportunity_id=str(opportunity_id)
+    )
+    return {
+        "outcome": "matched",
+        "match": {
+            "id": match["id"],
+            "opportunity": _opportunity_context(supabase, opportunity_id),
+            "created_at": match.get("created_at"),
+            "profile": _matched_profile_payload(
+                supabase, target, bucket=bucket, signed_url_ttl=signed_url_ttl
+            ),
+        },
+    }
+
+
+def pass_in_opportunity(
+    supabase: Client,
+    auth_user_id: UUID,
+    target_profile_id: UUID,
+    opportunity_id: UUID,
+) -> dict[str, Any]:
+    """Record the viewer's PASS within an opportunity (no match can result)."""
+    viewer = _verified_viewer(supabase, auth_user_id)
+    require_published_opportunity(supabase, opportunity_id)
+    target = _eligible_opportunity_target(
+        supabase, target_profile_id, viewer["id"], opportunity_id
+    )
+
+    _reject_if_already_decided(
+        supabase, viewer["id"], str(target["id"]), opportunity_id=str(opportunity_id)
+    )
+    _insert_action(
+        supabase, viewer["id"], str(target["id"]), "PASS", opportunity_id=str(opportunity_id)
+    )
+    return {"outcome": "pass_recorded"}
+
+
+def _eligible_opportunity_target(
+    supabase: Client, target_profile_id: UUID, viewer_profile_id: str, opportunity_id: UUID
+) -> dict[str, Any]:
+    """Resolve the target profile as a participant of the SAME opportunity.
+
+    The target must have applied to this opportunity, be VERIFIED, and be
+    outside any active block with the viewer — otherwise the same 404 (no
+    existence leak). This is what keeps the opportunity-scoped feed and
+    actions from leaking across opportunities.
+    """
+    if str(target_profile_id) == viewer_profile_id:
+        raise NotFoundError("Profile not found.")
+    blocked_ids = _active_blocked_ids(supabase, viewer_profile_id)
+    if str(target_profile_id) in blocked_ids:
+        raise NotFoundError("Profile not found.")
+    try:
+        response = (
+            supabase.table("applications")
+            .select("profile_id")
+            .eq("opportunity_id", str(opportunity_id))
+            .eq("profile_id", str(target_profile_id))
+            .eq("status", "APPLIED")
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("Opportunity target lookup failed")
+        raise ServiceUnavailableError(
+            "This action is temporarily unavailable.", code="database_unavailable"
+        ) from exc
+    if not getattr(response, "data", response):
+        raise NotFoundError("Profile not found.")
+    try:
+        response = (
+            supabase.table("profiles")
+            .select(_CANDIDATE_COLUMNS)
+            .eq("id", str(target_profile_id))
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("Target profile lookup failed")
+        raise ServiceUnavailableError(
+            "This action is temporarily unavailable.", code="database_unavailable"
+        ) from exc
+    target = getattr(response, "data", response)
+    if not target or not _is_verified(supabase, str(target["id"])):
+        raise NotFoundError("Profile not found.")
+    return target
+
+
+def _opportunity_context(supabase: Client, opportunity_id: UUID) -> dict[str, Any]:
+    """Client-safe opportunity context (title + category/activity) for matches."""
+    try:
+        response = (
+            supabase.table("opportunities")
+            .select(_OPPORTUNITY_CONTEXT_COLUMNS)
+            .eq("id", str(opportunity_id))
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("Opportunity context lookup failed")
+        raise ServiceUnavailableError(
+            "Matches are temporarily unavailable.", code="database_unavailable"
+        ) from exc
+    row = getattr(response, "data", response)
+    if not row:
+        return {"id": str(opportunity_id), "title": None}
+    category = row.get("categories") or {}
+    activity = row.get("activities") or {}
+    return {
+        "id": str(row["id"]),
+        "title": row.get("title"),
+        "category": (
+            {
+                "id": str(category["id"]),
+                "name": category.get("name"),
+                "slug": category.get("slug"),
+                "icon": category.get("icon"),
+            }
+            if category.get("id")
+            else None
+        ),
+        "activity": (
+            {"id": str(activity["id"]), "name": activity.get("name"), "slug": activity.get("slug")}
+            if activity.get("id")
+            else None
+        ),
+    }
+
+
+def _reject_if_already_decided(
+    supabase: Client,
+    actor_profile_id: str,
+    target_profile_id: str,
+    *,
+    opportunity_id: str | None = None,
+) -> None:
+    """409 when the viewer has ANY prior action on this target within the
+    given opportunity scope (or globally for legacy actions)."""
+    try:
+        query = (
+            supabase.table("dating_actions")
+            .select("id")
+            .eq("actor_profile_id", actor_profile_id)
+            .eq("target_profile_id", target_profile_id)
+        )
+        if opportunity_id is not None:
+            query = query.eq("opportunity_id", opportunity_id)
+        response = query.maybe_single().execute()
+    except Exception as exc:
+        logger.exception("Existing action lookup failed")
+        raise ServiceUnavailableError(
+            "This action is temporarily unavailable.", code="database_unavailable"
+        ) from exc
+    if getattr(response, "data", response):
+        raise ConflictError(
+            "You have already decided on this profile within this opportunity.",
+            code="already_decided",
+        )
+
+
+def _insert_action(
+    supabase: Client,
+    actor_profile_id: str,
+    target_profile_id: str,
+    action_type: str,
+    *,
+    opportunity_id: str | None = None,
+) -> None:
+    """Insert the action row; a concurrent duplicate surfaces as 409.
+
+    `opportunity_id` scopes the action (Phase 2) — legacy callers omit it.
+    """
+    row: dict[str, Any] = {
+        "actor_profile_id": actor_profile_id,
+        "target_profile_id": target_profile_id,
+        "action_type": action_type,
+    }
+    if opportunity_id is not None:
+        row["opportunity_id"] = opportunity_id
+    try:
+        response = (
+            supabase.table("dating_actions").insert(row).execute()
+        )
+    except Exception as exc:
+        detail = str(exc)
+        if (
+            "duplicate key" in detail
+            or "dating_actions_actor_target_opportunity_unique" in detail
+        ):
+            raise ConflictError(
+                "You have already decided on this profile within this opportunity.",
+                code="already_decided",
+            ) from exc
+        if "not an active participant" not in detail:
+            logger.exception("Dating action insert failed")
+        raise ServiceUnavailableError(
+            "This action could not be recorded. Please try again later.",
+            code="database_insert_failed",
+        ) from exc
+    if not getattr(response, "data", None):
+        raise ServiceUnavailableError(
+            "This action could not be recorded. Please try again later.",
+            code="database_insert_failed",
+        )
+
+
+def _find_like(
+    supabase: Client, *, actor: str, target: str, opportunity_id: str | None = None
+) -> bool:
+    """True iff a LIKE row exists from `actor` to `target` (optionally scoped)."""
+    try:
+        query = (
+            supabase.table("dating_actions")
+            .select("id")
+            .eq("actor_profile_id", actor)
+            .eq("target_profile_id", target)
+            .eq("action_type", "LIKE")
+        )
+        if opportunity_id is not None:
+            query = query.eq("opportunity_id", opportunity_id)
+        response = query.maybe_single().execute()
+    except Exception as exc:
+        logger.exception("Reverse like lookup failed")
+        raise ServiceUnavailableError(
+            "This action is temporarily unavailable.", code="database_unavailable"
+        ) from exc
+    return bool(getattr(response, "data", response))
+
+
+def _create_match_once(
+    supabase: Client,
+    profile_id_a: str,
+    profile_id_b: str,
+    *,
+    opportunity_id: str | None = None,
+) -> dict[str, Any]:
+    """Create the canonical match exactly once; return the match row.
+
+    The pair is stored in canonical order (user_a_id < user_b_id) and the
+    partial UNIQUE(user_a_id, user_b_id, opportunity_id) constraint is the
+    concurrency arbiter: `ignore_duplicates` turns a concurrent duplicate
+    creation into a no-op, then the existing row is read back.
+    """
+    user_a, user_b = sorted((profile_id_a, profile_id_b))
+    row: dict[str, Any] = {"user_a_id": user_a, "user_b_id": user_b}
+    if opportunity_id is not None:
+        row["opportunity_id"] = opportunity_id
+    try:
+        response = (
+            supabase.table("matches")
+            .upsert(row, ignore_duplicates=True)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if rows:
+            return rows[0]
+        response = (
+            supabase.table("matches")
+            .select("id,created_at")
+            .eq("user_a_id", user_a)
+            .eq("user_b_id", user_b)
+        )
+        if opportunity_id is not None:
+            response = response.eq("opportunity_id", opportunity_id)
+        response = response.maybe_single().execute()
+        match = getattr(response, "data", response)
+        if not match:
+            raise ServiceUnavailableError(
+                "The match could not be created. Please try again later.",
+                code="database_insert_failed",
+            )
+        return match
+    except ServiceUnavailableError:
+        raise
+    except Exception as exc:
+        logger.exception("Match creation failed")
+        raise ServiceUnavailableError(
+            "The match could not be created. Please try again later.",
+            code="database_insert_failed",
+        ) from exc
+
+
 def list_matches(
     supabase: Client,
     auth_user_id: UUID,
@@ -115,7 +458,7 @@ def list_matches(
     try:
         response = (
             supabase.table("matches")
-            .select("id,user_a_id,user_b_id,created_at")
+            .select("id,user_a_id,user_b_id,opportunity_id,created_at")
             .is_("unmatched_at", "null")
             .or_(f"user_a_id.eq.{viewer_id},user_b_id.eq.{viewer_id}")
             .order("created_at", desc=True)
@@ -159,17 +502,19 @@ def list_matches(
         profile = profiles_by_id.get(partner_id)
         if profile is None:
             continue
-        matches.append(
-            {
-                "id": str(row["id"]),
-                "created_at": row.get("created_at"),
-                "profile": _candidate_payload(
-                    profile,
-                    interests_by_profile.get(partner_id, []),
-                    photos_by_profile.get(partner_id, []),
-                ),
-            }
-        )
+        opportunity_id = row.get("opportunity_id")
+        entry: dict[str, Any] = {
+            "id": str(row["id"]),
+            "created_at": row.get("created_at"),
+            "profile": _candidate_payload(
+                profile,
+                interests_by_profile.get(partner_id, []),
+                photos_by_profile.get(partner_id, []),
+            ),
+        }
+        if opportunity_id:
+            entry["opportunity"] = _opportunity_context(supabase, UUID(str(opportunity_id)))
+        matches.append(entry)
     return {"matches": matches}
 
 
@@ -280,132 +625,6 @@ def _eligible_target(
     if not target or not _is_verified(supabase, str(target["id"])):
         raise NotFoundError("Profile not found.")
     return target
-
-
-def _reject_if_already_decided(
-    supabase: Client, actor_profile_id: str, target_profile_id: str
-) -> None:
-    """409 when the viewer has ANY prior action on this target."""
-    try:
-        response = (
-            supabase.table("dating_actions")
-            .select("id")
-            .eq("actor_profile_id", actor_profile_id)
-            .eq("target_profile_id", target_profile_id)
-            .maybe_single()
-            .execute()
-        )
-    except Exception as exc:
-        logger.exception("Existing action lookup failed")
-        raise ServiceUnavailableError(
-            "This action is temporarily unavailable.", code="database_unavailable"
-        ) from exc
-    if getattr(response, "data", response):
-        raise ConflictError(
-            "You have already decided on this profile.", code="already_decided"
-        )
-
-
-def _insert_action(
-    supabase: Client, actor_profile_id: str, target_profile_id: str, action_type: str
-) -> None:
-    """Insert the action row; a concurrent duplicate surfaces as 409."""
-    try:
-        response = (
-            supabase.table("dating_actions")
-            .insert(
-                {
-                    "actor_profile_id": actor_profile_id,
-                    "target_profile_id": target_profile_id,
-                    "action_type": action_type,
-                }
-            )
-            .execute()
-        )
-    except Exception as exc:
-        detail = str(exc)
-        if "duplicate key" in detail or "dating_actions_actor_target_unique" in detail:
-            raise ConflictError(
-                "You have already decided on this profile.", code="already_decided"
-            ) from exc
-        logger.exception("Dating action insert failed")
-        raise ServiceUnavailableError(
-            "This action could not be recorded. Please try again later.",
-            code="database_insert_failed",
-        ) from exc
-    if not getattr(response, "data", None):
-        raise ServiceUnavailableError(
-            "This action could not be recorded. Please try again later.",
-            code="database_insert_failed",
-        )
-
-
-def _find_like(supabase: Client, *, actor: str, target: str) -> bool:
-    """True iff a LIKE row exists from `actor` to `target`."""
-    try:
-        response = (
-            supabase.table("dating_actions")
-            .select("id")
-            .eq("actor_profile_id", actor)
-            .eq("target_profile_id", target)
-            .eq("action_type", "LIKE")
-            .maybe_single()
-            .execute()
-        )
-    except Exception as exc:
-        logger.exception("Reverse like lookup failed")
-        raise ServiceUnavailableError(
-            "This action is temporarily unavailable.", code="database_unavailable"
-        ) from exc
-    return bool(getattr(response, "data", response))
-
-
-def _create_match_once(
-    supabase: Client, profile_id_a: str, profile_id_b: str
-) -> dict[str, Any]:
-    """Create the canonical match exactly once; return the match row.
-
-    The pair is stored in canonical order (user_a_id < user_b_id) and the
-    UNIQUE(user_a_id, user_b_id) constraint is the concurrency arbiter:
-    `ignore_duplicates` turns a concurrent duplicate creation into a no-op,
-    then the existing row is read back.
-    """
-    user_a, user_b = sorted((profile_id_a, profile_id_b))
-    try:
-        response = (
-            supabase.table("matches")
-            .upsert(
-                {"user_a_id": user_a, "user_b_id": user_b},
-                ignore_duplicates=True,
-            )
-            .execute()
-        )
-        rows = getattr(response, "data", None) or []
-        if rows:
-            return rows[0]
-        response = (
-            supabase.table("matches")
-            .select("id,created_at")
-            .eq("user_a_id", user_a)
-            .eq("user_b_id", user_b)
-            .maybe_single()
-            .execute()
-        )
-        match = getattr(response, "data", response)
-        if not match:
-            raise ServiceUnavailableError(
-                "The match could not be created. Please try again later.",
-                code="database_insert_failed",
-            )
-        return match
-    except ServiceUnavailableError:
-        raise
-    except Exception as exc:
-        logger.exception("Match creation failed")
-        raise ServiceUnavailableError(
-            "The match could not be created. Please try again later.",
-            code="database_insert_failed",
-        ) from exc
 
 
 def _profiles_by_id(supabase: Client, profile_ids: list[str]) -> dict[str, dict[str, Any]]:

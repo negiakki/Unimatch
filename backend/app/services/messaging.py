@@ -96,7 +96,8 @@ def list_conversations(
         response = (
             supabase.table("matches")
             .select(
-                "id,user_a_id,user_b_id,created_at,"
+                "id,user_a_id,user_b_id,opportunity_id,created_at,"
+                "last_message_at,"
                 "user_a_unread_count,user_b_unread_count"
             )
             .is_("unmatched_at", "null")
@@ -138,6 +139,12 @@ def list_conversations(
     photos_by_profile = _photos_by_profile(
         supabase, partner_ids, bucket=bucket, signed_url_ttl=signed_url_ttl
     )
+    # The opportunity is the reason two people are talking: every conversation
+    # carries it so the UI can show "why you matched" without a second call.
+    opportunity_ids = sorted(
+        {str(row["opportunity_id"]) for row in visible if row.get("opportunity_id")}
+    )
+    opportunities_by_id = _opportunities_by_id(supabase, opportunity_ids)
 
     conversations = []
     for row in visible:
@@ -152,18 +159,20 @@ def list_conversations(
             if str(row["user_a_id"]) == viewer_id
             else "user_b_unread_count"
         )
-        conversations.append(
-            {
-                "id": str(row["id"]),
-                "created_at": row.get("created_at"),
-                "unread_count": int(row.get(unread_column) or 0),
-                "profile": _candidate_payload(
-                    profile,
-                    interests_by_profile.get(partner_id, []),
-                    photos_by_profile.get(partner_id, []),
-                ),
-            }
-        )
+        entry: dict[str, Any] = {
+            "id": str(row["id"]),
+            "created_at": row.get("created_at"),
+            "unread_count": int(row.get(unread_column) or 0),
+            "profile": _candidate_payload(
+                profile,
+                interests_by_profile.get(partner_id, []),
+                photos_by_profile.get(partner_id, []),
+            ),
+        }
+        opportunity_id = row.get("opportunity_id")
+        if opportunity_id:
+            entry["opportunity"] = opportunities_by_id.get(str(opportunity_id))
+        conversations.append(entry)
     return {"conversations": conversations}
 
 
@@ -395,6 +404,64 @@ def _require_conversation_active(match: dict[str, Any]) -> None:
     behavior to unauthorized conversations (RLS re-enforces the same rule)."""
     if _conversation_is_expired(match):
         raise NotFoundError("Conversation not found.")
+
+
+def _opportunities_by_id(
+    supabase: Client, opportunity_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """One batched fetch of the conversations' opportunity context.
+
+    The opportunity is the reason two people are talking, so every
+    conversation carries its title/category/activity. One batched query — no
+    per-conversation fan-out. Read-only reference fields only.
+    """
+    if not opportunity_ids:
+        return {}
+    try:
+        response = (
+            supabase.table("opportunities")
+            .select(
+                "id,title,opportunity_date,location,"
+                "categories(id,name,slug,icon),activities(id,name,slug)"
+            )
+            .in_("id", opportunity_ids)
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("Conversation opportunity lookup failed")
+        raise ServiceUnavailableError(
+            "Conversations are temporarily unavailable.", code="database_unavailable"
+        ) from exc
+    out: dict[str, dict[str, Any]] = {}
+    for row in getattr(response, "data", None) or []:
+        category = row.get("categories") or {}
+        activity = row.get("activities") or {}
+        out[str(row["id"])] = {
+            "id": str(row["id"]),
+            "title": row.get("title"),
+            "opportunity_date": row.get("opportunity_date"),
+            "location": row.get("location"),
+            "category": (
+                {
+                    "id": str(category["id"]),
+                    "name": category.get("name"),
+                    "slug": category.get("slug"),
+                    "icon": category.get("icon"),
+                }
+                if category.get("id")
+                else None
+            ),
+            "activity": (
+                {
+                    "id": str(activity["id"]),
+                    "name": activity.get("name"),
+                    "slug": activity.get("slug"),
+                }
+                if activity.get("id")
+                else None
+            ),
+        }
+    return out
 
 
 def _profiles_by_id(supabase: Client, profile_ids: list[str]) -> dict[str, dict[str, Any]]:

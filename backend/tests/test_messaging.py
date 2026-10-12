@@ -55,6 +55,19 @@ class FakeResponse:
         self.data = data
 
 
+def _project(row, columns):
+    """Keep only the requested columns, mirroring PostgREST's projection.
+
+    Embedded selects like "categories(id,name)" are passed through untouched ΓÇö
+    the fake stores embeds as plain keys, so projecting them would drop data.
+    """
+    if not columns:
+        return row
+    if any("(" in column for column in columns):
+        return row
+    return {key: value for key, value in row.items() if key in columns}
+
+
 class FakeTable:
     def __init__(self, tables, table_name, fail_tables, state):
         self._tables = tables
@@ -66,13 +79,18 @@ class FakeTable:
         self._is_filters: dict = {}
         self._or_filters: list = []
         self._orders: list = []
+        self._columns: list | None = None
         self._limit: int | None = None
         self._single = False
         self._insert_rows = None
         self._update_values = None
         state["queries"][table_name] = state["queries"].get(table_name, 0) + 1
 
-    def select(self, _columns):
+    def select(self, columns):
+        # PostgREST projects to the requested columns; the backend relies on it
+        # (e.g. the conversation list reads last_message_at to apply the 24h
+        # rule). Mirror that so a missing column cannot pass silently.
+        self._columns = [c.strip() for c in str(columns).split(",")]
         return self
 
     def insert(self, rows):
@@ -159,6 +177,7 @@ class FakeTable:
             )
         if self._limit is not None:
             matched = matched[: self._limit]
+        matched = [_project(row, self._columns) for row in matched]
         if self._single:
             return FakeResponse(matched[0] if matched else None)
         return FakeResponse(matched)
@@ -956,6 +975,37 @@ def test_expired_conversation_is_absent_from_conversation_list(client, fake):
     assert client.get(CONVERSATIONS_API, headers=AUTH_HEADERS).json()["conversations"] == []
     # The match itself is untouched — expiry is a messaging concept only.
     assert fake.tables["matches"][0]["unmatched_at"] is None
+
+
+def test_conversation_list_selects_last_message_at(client, fake):
+    # Regression: the list query must request last_message_at, because
+    # _conversation_is_expired() reads it from the row. When it was omitted,
+    # PostgREST returned rows without the column, the filter saw None, and
+    # expired conversations stayed listed while the detail endpoint 404'd.
+    assert send(client, "recent").status_code == 201
+    fake.tables["matches"].append(
+        {
+            "id": str(uuid4()),
+            "user_a_id": str(PARTNER_PROFILE_ID),
+            "user_b_id": str(VIEWER_PROFILE_ID),
+            "created_at": "2026-08-31T10:00:00+00:00",
+            "unmatched_at": None,
+            "last_message_at": "2026-08-31T10:05:00+00:00",  # long expired
+            "user_a_unread_count": 0,
+            "user_b_unread_count": 0,
+        }
+    )
+
+    resp = client.get(CONVERSATIONS_API, headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    conversations = resp.json()["conversations"]
+
+    # The fresh conversation survives; the expired one is excluded.
+    assert len(conversations) == 1
+    assert conversations[0]["id"] == str(MATCH_ID)
+
+    # The expired match itself is untouched ΓÇö expiry is a messaging concept.
+    assert fake.tables["matches"][1]["unmatched_at"] is None
 
 
 def test_send_after_expiry_starts_fresh_and_never_restores_old_messages(client, fake):
