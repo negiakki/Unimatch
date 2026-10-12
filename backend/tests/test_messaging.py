@@ -60,7 +60,7 @@ class FakeResponse:
 def _project(row, columns):
     """Keep only the requested columns, mirroring PostgREST's projection.
 
-    Embedded selects like "categories(id,name)" are passed through untouched ΓÇö
+    Embedded selects like "categories(id,name)" are passed through untouched —
     the fake stores embeds as plain keys, so projecting them would drop data.
     """
     if not columns:
@@ -1007,7 +1007,7 @@ def test_conversation_list_selects_last_message_at(client, fake):
     assert len(conversations) == 1
     assert conversations[0]["id"] == str(MATCH_ID)
 
-    # The expired match itself is untouched ΓÇö expiry is a messaging concept.
+    # The expired match itself is untouched — expiry is a messaging concept.
     assert fake.tables["matches"][1]["unmatched_at"] is None
 
 
