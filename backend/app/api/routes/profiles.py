@@ -62,7 +62,12 @@ class ProfileWrite(BaseModel):
 
     first_name: str
     date_of_birth: date
-    university_id: UUID
+    # Exactly one of university_id / custom_university_name is required (see
+    # `_validate_university_claim`). `university_id` is a row in the curated
+    # read-only catalog; `custom_university_name` is free text for students
+    # whose institution is not listed and never creates a catalog row.
+    university_id: UUID | None = None
+    custom_university_name: str | None = None
     course: str
     academic_year: int = Field(ge=1, le=6)
     gender: Gender
@@ -146,6 +151,33 @@ class ProfileWrite(BaseModel):
         if len(trimmed) > 120:
             raise ValueError("course must be at most 120 characters.")
         return trimmed
+
+    @field_validator("custom_university_name")
+    @classmethod
+    def _validate_custom_university_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            # An empty string means "not supplied" — the exactly-one validator
+            # below turns this into a precise error instead of storing "".
+            return None
+        if len(trimmed) > profile_service.MAX_CUSTOM_UNIVERSITY_NAME_LENGTH:
+            raise ValueError(
+                "custom_university_name must be at most "
+                f"{profile_service.MAX_CUSTOM_UNIVERSITY_NAME_LENGTH} characters."
+            )
+        return trimmed
+
+    @model_validator(mode="after")
+    def _validate_university_claim(self) -> "ProfileWrite":
+        if self.university_id is not None and self.custom_university_name:
+            raise ValueError(
+                "Choose a university from the list, or give its name — not both."
+            )
+        if self.university_id is None and not self.custom_university_name:
+            raise ValueError("Select your university, or name the one not listed.")
+        return self
 
     @field_validator("bio")
     @classmethod
@@ -236,7 +268,10 @@ def _profile_payload(row: dict[str, Any]) -> dict[str, Any]:
         "id": str(row.get("id")),
         "first_name": row.get("first_name"),
         "date_of_birth": row.get("date_of_birth"),
-        "university_id": str(row.get("university_id")),
+        # Nullable: a custom-university profile has no catalog row. Never
+        # str(None) — that would hand the client the literal "None".
+        "university_id": str(row["university_id"]) if row.get("university_id") else None,
+        "custom_university_name": row.get("custom_university_name"),
         "course": row.get("course"),
         "academic_year": row.get("academic_year"),
         "gender": row.get("gender"),

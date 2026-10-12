@@ -70,7 +70,8 @@ MAX_LIMIT = 50
 # Client-safe projection of a candidate profile + its university. Note the
 # deliberate absence of auth_user_id and any verification/submission columns.
 _CANDIDATE_COLUMNS = (
-    "id,first_name,date_of_birth,university_id,course,academic_year,gender,"
+    "id,first_name,date_of_birth,university_id,custom_university_name,course,"
+    "academic_year,gender,"
     "seeking_gender,bio,relationship_intent,height_cm,hometown,profile_prompts,"
     "motivations,created_at,universities(id,name,city,state,country)"
 )
@@ -554,6 +555,7 @@ def _candidate_payload(
     with a `source` discriminator (catalog vs custom).
     """
     university = row.get("universities") or {}
+    custom_name = (row.get("custom_university_name") or "").strip() or None
     return {
         "id": str(row["id"]),
         "first_name": row.get("first_name"),
@@ -565,6 +567,13 @@ def _candidate_payload(
             "state": university.get("state"),
             "country": university.get("country"),
         },
+        # Students at an unlisted institution show their own typed name rather
+        # than a blank catalog card. Plain public data — never verification or
+        # document state.
+        "custom_university_name": custom_name,
+        "university_label": (
+            custom_name or university.get("name") or "University not listed"
+        ),
         "course": row.get("course"),
         "academic_year": row.get("academic_year"),
         "gender": row.get("gender"),

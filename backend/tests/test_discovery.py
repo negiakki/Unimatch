@@ -645,6 +645,8 @@ RESPONSE_KEYS = {
     "first_name",
     "age",
     "university",
+    "custom_university_name",
+    "university_label",
     "course",
     "academic_year",
     "gender",

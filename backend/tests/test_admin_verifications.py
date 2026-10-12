@@ -130,6 +130,7 @@ def profile_row(profile_id, **overrides):
         "date_of_birth": "2003-04-12",
         "course": "Computer Science",
         "academic_year": 3,
+        "custom_university_name": None,
         "bio": "private profile bio",
         "social_links": {"instagram": "@jamie"},
         "universities": university_row(),
@@ -157,6 +158,7 @@ def queue_row(status, submitted_at, profile, **overrides):
             "date_of_birth": profile["date_of_birth"],
             "course": profile["course"],
             "academic_year": profile["academic_year"],
+            "custom_university_name": profile["custom_university_name"],
             "bio": profile["bio"],
             "social_links": profile["social_links"],
             "universities": profile["universities"],
@@ -395,6 +397,8 @@ def test_queue_never_discloses_storage_path_or_sensitive_fields(client, fake):
         "course",
         "academic_year",
         "university",
+        "custom_university_name",
+        "university_label",
     }
     assert set(item["student"]["university"].keys()) == {
         "name",
@@ -402,6 +406,81 @@ def test_queue_never_discloses_storage_path_or_sensitive_fields(client, fake):
         "state",
         "country",
     }
+
+
+# ---------------------------------------------------------------------------
+# Custom universities ("My university isn't listed").
+#
+# A profile claims EXACTLY ONE university, so these are the two shapes a
+# reviewer must be able to read unambiguously. Getting this wrong is a false
+# approve/reject, so the projection must carry the typed name verbatim.
+# ---------------------------------------------------------------------------
+
+
+def test_queue_exposes_custom_university_name(client, fake):
+    profile = profile_row(
+        uuid4(),
+        custom_university_name="Forest Research Institute",
+        # A custom claim has no catalog row, so the join comes back empty.
+        universities={},
+    )
+    fake.tables["verification_submissions"] = [
+        queue_row("PENDING", "2026-08-28T10:00:00+00:00", profile)
+    ]
+
+    resp = client.get(API, headers=STAFF_AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    student = resp.json()[0]["student"]
+    assert student["custom_university_name"] == "Forest Research Institute"
+    assert student["university"]["name"] is None
+    # The single field the reviewer UI renders — never a blank catalog row.
+    assert student["university_label"] == "Forest Research Institute"
+
+
+def test_queue_label_prefers_the_catalog_name_for_curved_universities(client, fake):
+    profile = profile_row(uuid4(), universities=university_row(name="Doon University"))
+    fake.tables["verification_submissions"] = [
+        queue_row("PENDING", "2026-08-28T10:00:00+00:00", profile)
+    ]
+
+    resp = client.get(API, headers=STAFF_AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    student = resp.json()[0]["student"]
+    assert student["custom_university_name"] is None
+    assert student["university_label"] == "Doon University"
+
+
+def test_queue_custom_university_name_is_not_stored_verbatim_with_padding(
+    client, fake
+):
+    profile = profile_row(uuid4(), custom_university_name="  Panjab University  ")
+    fake.tables["verification_submissions"] = [
+        queue_row("PENDING", "2026-08-28T10:00:00+00:00", profile)
+    ]
+
+    resp = client.get(API, headers=STAFF_AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    student = resp.json()[0]["student"]
+    assert student["custom_university_name"] == "Panjab University"
+    assert student["university_label"] == "Panjab University"
+
+
+def test_queue_label_falls_back_when_neither_university_is_present(client, fake):
+    """Defensive: an inconsistent row must still render something readable."""
+    profile = profile_row(uuid4(), custom_university_name=None, universities={})
+    fake.tables["verification_submissions"] = [
+        queue_row("PENDING", "2026-08-28T10:00:00+00:00", profile)
+    ]
+
+    resp = client.get(API, headers=STAFF_AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    student = resp.json()[0]["student"]
+    assert student["custom_university_name"] is None
+    assert student["university_label"] == "University not on file"
 
 
 # ---------------------------------------------------------------------------

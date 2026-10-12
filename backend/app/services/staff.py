@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # verification_submissions_status_submitted_idx (status, submitted_at).
 _QUEUE_SELECT = (
     "id,profile_id,status,submitted_at,"
-    "profiles(first_name,date_of_birth,course,academic_year,"
+    "profiles(first_name,date_of_birth,course,academic_year,custom_university_name,"
     "universities(name,city,state,country))"
 )
 
@@ -100,9 +100,16 @@ def get_review_queue(supabase: Client, status: str) -> list[dict[str, Any]]:
 
 
 def _queue_item(row: dict[str, Any]) -> dict[str, Any]:
-    """Project a joined submission row to the reviewer-safe queue shape."""
+    """Project a joined submission row to the reviewer-safe queue shape.
+
+    A profile claims exactly one university, so exactly one of `university.name`
+    / `custom_university_name` is populated. The custom name is what the student
+    typed and must be shown verbatim: the reviewer compares it against the
+    document, and an opaque "not on file" would leave the decision guesswork.
+    """
     profile = row.get("profiles") or {}
     university = profile.get("universities") or {}
+    custom_name = (profile.get("custom_university_name") or "").strip() or None
     return {
         "id": str(row["id"]),
         "profile_id": str(row["profile_id"]),
@@ -119,6 +126,14 @@ def _queue_item(row: dict[str, Any]) -> dict[str, Any]:
                 "state": university.get("state"),
                 "country": university.get("country"),
             },
+            "custom_university_name": custom_name,
+            # One field the reviewer UI can render unconditionally, so a custom
+            # institution is never displayed as a blank catalog row.
+            "university_label": (
+                custom_name
+                or university.get("name")
+                or "University not on file"
+            ),
         },
     }
 

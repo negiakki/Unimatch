@@ -48,7 +48,8 @@ logger = logging.getLogger(__name__)
 # Client-safe projection — auth_user_id and any verification data are
 # deliberately excluded from every response built from these columns.
 _PROFILE_COLUMNS = (
-    "id,first_name,date_of_birth,university_id,course,academic_year,"
+    "id,first_name,date_of_birth,university_id,custom_university_name,"
+    "course,academic_year,"
     "gender,seeking_gender,bio,relationship_intent,height_cm,hometown,"
     "motivations,profile_prompts,social_links,created_at,updated_at"
 )
@@ -64,6 +65,10 @@ _CUSTOM_INTEREST_COLUMNS = "id,profile_id,name"
 MAX_PROFILE_INTERESTS = 8
 
 MAX_CUSTOM_INTEREST_NAME_LENGTH = 40
+
+# Mirrors profiles_custom_university_name_valid in the database (1-120 after
+# trimming, matching the `course` limit). The DB CHECK remains the authority.
+MAX_CUSTOM_UNIVERSITY_NAME_LENGTH = 120
 
 # Mirrors profiles_motivations_valid in the database — the DB CHECK remains
 # the authority; this is the route/service-side mirror for precise 422s.
@@ -134,7 +139,7 @@ def create_profile(
     interest_ids = _extract_interest_ids(values)
     custom_names = _extract_custom_interest_names(values)
     _extract_motivations(values)
-    ensure_university_exists(supabase, values["university_id"])
+    ensure_university_claim(supabase, values.get("university_id"), values.get("custom_university_name"))
     ensure_interests_exist(supabase, interest_ids)
     ensure_custom_interest_names_valid(supabase, custom_names)
 
@@ -183,7 +188,7 @@ def update_own_profile(
     interest_ids = _extract_interest_ids(values)
     custom_names = _extract_custom_interest_names(values)
     _extract_motivations(values)
-    ensure_university_exists(supabase, values["university_id"])
+    ensure_university_claim(supabase, values.get("university_id"), values.get("custom_university_name"))
     ensure_interests_exist(supabase, interest_ids)
     ensure_custom_interest_names_valid(supabase, custom_names)
 
@@ -209,12 +214,41 @@ def update_own_profile(
     return profile
 
 
-def ensure_university_exists(supabase: Client, university_id: UUID) -> None:
-    """Verify the referenced university exists in the read-only catalog.
+def ensure_university_claim(
+    supabase: Client, university_id: UUID | None, custom_university_name: str | None
+) -> None:
+    """Re-check the exactly-one university claim and the catalog reference.
 
-    An explicit check yields a precise structured 422; the database FK
-    (`profiles_university_id_fkey`) remains the defense-in-depth guarantee.
+    The route validator already rejects both-or-neither; this mirrors that rule
+    server-side and turns it into a precise 422. When a catalog id is supplied
+    it must exist in the read-only catalog; the database FK
+    (`profiles_university_id_fkey`) remains the defense-in-depth guarantee. A
+    custom name is never resolved against the catalog — it is stored verbatim so
+    a reviewer sees exactly what the student typed.
     """
+    has_catalog = university_id is not None
+    has_custom = bool(custom_university_name and custom_university_name.strip())
+    if has_catalog and has_custom:
+        raise AppError(
+            "Choose a university from the list, or give its name — not both.",
+            status_code=422,
+            code="validation_error",
+        )
+    if not has_catalog and not has_custom:
+        raise AppError(
+            "Select your university, or name the one not listed.",
+            status_code=422,
+            code="validation_error",
+        )
+    if has_custom and len(custom_university_name.strip()) > MAX_CUSTOM_UNIVERSITY_NAME_LENGTH:
+        raise AppError(
+            "The university name must be "
+            f"{MAX_CUSTOM_UNIVERSITY_NAME_LENGTH} characters or fewer.",
+            status_code=422,
+            code="validation_error",
+        )
+    if not has_catalog:
+        return
     try:
         response = (
             supabase.table("universities")
@@ -622,6 +656,12 @@ def _translate_write_error(exc: Exception, operation: str) -> Exception:
             status_code=422,
             code="validation_error",
         )
+    if "profiles_university_claimed" in detail:
+        return AppError(
+            "Select your university, or name the one not listed — but not both.",
+            status_code=422,
+            code="validation_error",
+        )
     if "profiles_age_18_plus" in detail or "profiles_date_of_birth_realistic" in detail:
         return AppError(
             "The date of birth is not valid.", status_code=422, code="validation_error"
@@ -629,6 +669,7 @@ def _translate_write_error(exc: Exception, operation: str) -> Exception:
     for constraint in (
         "profiles_first_name_valid",
         "profiles_course_valid",
+        "profiles_custom_university_name_valid",
         "profiles_academic_year_valid",
         "profiles_gender_valid",
         "profiles_seeking_gender_valid",

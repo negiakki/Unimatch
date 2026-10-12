@@ -77,6 +77,7 @@ PROFILE_RESPONSE_KEYS = {
     "first_name",
     "date_of_birth",
     "university_id",
+    "custom_university_name",
     "course",
     "academic_year",
     "gender",
@@ -786,6 +787,188 @@ def test_alternative_university_is_accepted(client, fake):
 
     assert resp.status_code == 201
     assert fake.tables["profiles"][0]["university_id"] == str(TECH_UNIVERSITY_ID)
+
+
+# ---------------------------------------------------------------------------
+# 6b. Exactly-one university claim: a catalog row XOR a custom name.
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_university_only_is_accepted(client, fake):
+    """university_id set, no custom name — the normal curated path."""
+    payload = {
+        **VALID_PROFILE,
+        "university_id": str(TECH_UNIVERSITY_ID),
+        "custom_university_name": None,
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["university_id"] == str(TECH_UNIVERSITY_ID)
+    assert body["custom_university_name"] is None
+
+
+def test_custom_university_only_is_accepted(client, fake):
+    """No catalog row — the student typed their institution instead."""
+    payload = {
+        **VALID_PROFILE,
+        "university_id": None,
+        "custom_university_name": "Forest Research Institute",
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    stored = fake.tables["profiles"][0]
+    assert stored["university_id"] is None
+    assert stored["custom_university_name"] == "Forest Research Institute"
+    # Never promoted into the shared catalog.
+    assert [row["name"] for row in fake.tables["universities"]] == [
+        row["name"] for row in UNIVERSITY_ROWS
+    ]
+    body = resp.json()
+    assert body["university_id"] is None
+    assert body["custom_university_name"] == "Forest Research Institute"
+
+
+def test_custom_university_name_is_trimmed(client, fake):
+    payload = {
+        **VALID_PROFILE,
+        "university_id": None,
+        "custom_university_name": "  Forest Research Institute  ",
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+    assert (
+        fake.tables["profiles"][0]["custom_university_name"]
+        == "Forest Research Institute"
+    )
+
+
+def test_both_university_id_and_custom_name_is_422(client, fake):
+    """Ambiguous claim is rejected — a reviewer must never have to guess."""
+    payload = {
+        **VALID_PROFILE,
+        "university_id": str(STATE_UNIVERSITY_ID),
+        "custom_university_name": "Forest Research Institute",
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+
+
+def test_neither_university_id_nor_custom_name_is_422(client, fake):
+    payload = {
+        **VALID_PROFILE,
+        "university_id": None,
+        "custom_university_name": None,
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+
+
+def test_blank_custom_university_name_falls_back_to_422(client, fake):
+    """Whitespace-only is normalized to None, so it becomes a missing claim."""
+    payload = {
+        **VALID_PROFILE,
+        "university_id": None,
+        "custom_university_name": "   ",
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+    assert fake.tables["profiles"] == []
+
+
+def test_overlong_custom_university_name_is_422(client, fake):
+    payload = {
+        **VALID_PROFILE,
+        "university_id": None,
+        "custom_university_name": "x" * 121,
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert_validation_error(resp)
+
+
+def test_custom_university_does_not_check_the_catalog(client, fake):
+    """A custom name is never resolved against the catalog, so it can't 422."""
+    payload = {
+        **VALID_PROFILE,
+        "university_id": None,
+        "custom_university_name": "Somewhere Not In The Catalog",
+    }
+
+    resp = client.post(f"{API}/me", json=payload, headers=AUTH_HEADERS)
+
+    assert resp.status_code == 201
+
+
+def test_put_switches_from_catalog_to_custom_university(client, fake):
+    fake.tables["profiles"] = [stored_profile()]
+
+    resp = client.put(
+        f"{API}/me",
+        json={
+            **VALID_PROFILE,
+            "university_id": None,
+            "custom_university_name": "Forest Research Institute",
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    stored = fake.tables["profiles"][0]
+    assert stored["university_id"] is None
+    assert stored["custom_university_name"] == "Forest Research Institute"
+
+
+def test_put_switches_from_custom_to_catalog_university(client, fake):
+    stored = stored_profile()
+    stored["university_id"] = None
+    stored["custom_university_name"] = "Forest Research Institute"
+    fake.tables["profiles"] = [stored]
+
+    resp = client.put(
+        f"{API}/me",
+        json={
+            **VALID_PROFILE,
+            "university_id": str(TECH_UNIVERSITY_ID),
+            "custom_university_name": None,
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    updated = fake.tables["profiles"][0]
+    assert updated["university_id"] == str(TECH_UNIVERSITY_ID)
+    assert updated["custom_university_name"] is None
+
+
+def test_put_unknown_university_is_rejected_when_custom_is_absent(client, fake):
+    """An unknown catalog id still 422s even though a custom path exists."""
+    resp = client.put(
+        f"{API}/me",
+        json={
+            **VALID_PROFILE,
+            "university_id": str(UNKNOWN_UNIVERSITY_ID),
+            "custom_university_name": None,
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    assert_validation_error(resp)
 
 
 # ---------------------------------------------------------------------------

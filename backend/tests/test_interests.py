@@ -92,6 +92,7 @@ PROFILE_RESPONSE_KEYS = {
     "first_name",
     "date_of_birth",
     "university_id",
+    "custom_university_name",
     "course",
     "academic_year",
     "gender",

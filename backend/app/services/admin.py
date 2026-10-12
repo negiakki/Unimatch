@@ -34,7 +34,7 @@ from app.core.exceptions import (
 logger = logging.getLogger(__name__)
 
 _ADMIN_PROFILE_COLUMNS = (
-    "id,first_name,course,academic_year,university_id,"
+    "id,first_name,course,academic_year,university_id,custom_university_name,"
     "gender,created_at,universities(id,name)"
 )
 
@@ -318,6 +318,11 @@ def _admin_user_payload(
     suspension: dict[str, Any] | None,
 ) -> dict[str, Any]:
     university = row.get("universities") or {}
+    # A profile claims exactly one university, so exactly one of
+    # `university.name` / `custom_university_name` is populated. Mirror the
+    # verification queue (staff._queue_item): a custom institution must never
+    # render as a blank catalog row.
+    custom_name = (row.get("custom_university_name") or "").strip() or None
     payload: dict[str, Any] = {
         "profile_id": str(row["id"]),
         "first_name": row.get("first_name"),
@@ -329,6 +334,10 @@ def _admin_user_payload(
             {"id": str(university["id"]), "name": university.get("name")}
             if university.get("id")
             else None
+        ),
+        "custom_university_name": custom_name,
+        "university_label": (
+            custom_name or university.get("name") or "University not on file"
         ),
         "verification": {
             "status": (verification or {}).get("status"),
