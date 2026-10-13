@@ -200,7 +200,7 @@ function MatchCard({
       </div>
 
       <div className="flex items-center gap-4 p-4">
-              <Avatar src={primaryPhotoUrl(profile)} name={profile.first_name} size="md" />
+        <Avatar src={primaryPhotoUrl(profile)} name={profile.first_name} size="md" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-lg font-bold tracking-tight">{name}</p>
           <p className="truncate text-sm text-muted">
