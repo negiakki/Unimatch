@@ -1,43 +1,63 @@
 # UniMatch — Product Requirements Document
 
-> Status: **Authoritative product specification for v1.** Interaction-level
-> detail is **TBD** where marked. UniMatch is an 18+ service.
+> Status: **authoritative product specification.** Anything marked *Planned*
+> has no implementation yet; everything else describes the shipped application.
+> Interaction-level detail lives in [DESIGN.md](DESIGN.md); endpoint contracts
+> live in [API.md](API.md).
 
 ## Product
 
-UniMatch is a mobile-first dating web application exclusively for university
-students. The core experience is intentionally familiar to Tinder/Bumble users:
-card-based discovery, like/pass, mutual matching, and chat.
+UniMatch is a mobile-first **partner & group discovery platform** for verified
+university students.
+
+> **Find your people for whatever you're doing.**
+
+The product is opportunity-first, not person-first. A student does not browse
+a stream of strangers hoping for chemistry; they pick something they are
+actually doing — a Dandiya night, a badminton tournament, a movie night, a
+weekend trip — join it, and then meet the other people joining it.
+
+```
+Discover → Category → Opportunity → People → Interested / Apply
+         → Match → Temporary chat
+```
+
+The opportunity supplies the context, the profile supplies the identity, the
+match supplies the connection, the chat supplies a short-lived way to arrange
+the thing.
 
 The differentiators are:
 
-1. **University restriction** — every user must be a verified university
-   student before accessing any dating feature.
-2. **18+ only** — no minor can create or use a dating profile.
+1. **Opportunity-first** — every connection happens inside something you are
+   both doing. The context is never optional.
+2. **University verification** — every user must verify their student status
+   before participating in anything.
+3. **18+ only** — no minor can hold a profile or participate.
 
-UniMatch is not a social network. No campus events, feeds, or unrelated
-social features. No AI dating assistants, AI-generated profiles, or other
-speculative functionality in v1.
+UniMatch is **not** a dating app and must not be presented as one: no romantic
+copy, no relationship framing in the interface, no user-authored "looking for
+a partner" listings.
 
 ## Core user journey
 
 ```
-Sign up (age 18+ gate) → create profile → submit student ID → manual review
-        → VERIFIED → discover profiles → like/pass → mutual match → chat
+Sign up (18+ gate) → create ONE profile → submit student ID → manual review
+        → VERIFIED → browse opportunities → join one → discover the people
+        in it → interested / pass → mutual match → temporary chat → arrange it
 ```
 
 ## Eligibility & age policy
 
 - UniMatch is an **18+ only** service.
-- Users must provide a date of birth at signup; the platform must verify
-  server-side that the user is at least 18 years old **before** a dating
-  profile can be created or used.
-- Age must be computed from date of birth and kept current over time; it may
-  never be self-declared as a free-text field for eligibility purposes.
-- Users under 18 are hard-blocked from signup/onboarding. There is no
-  junior/minor mode and no support for minors in v1.
+- Users provide a date of birth at signup; the platform verifies server-side
+  that the user is at least 18 **before** a profile can be used, and re-checks
+  the rule on every profile save.
+- Age is always computed from date of birth and kept current; it is never a
+  self-declared free-text field for eligibility or display.
+- Users under 18 are hard-blocked. There is no junior/minor mode and no
+  support for minors.
 
-## Verification (v1)
+## Verification
 
 - Student ID verification is the **only** verification method.
   Explicitly excluded: university email verification, email OTP, SMS OTP,
@@ -47,160 +67,270 @@ Sign up (age 18+ gate) → create profile → submit student ID → manual revie
 - Verification states are exactly: `PENDING`, `VERIFIED`, `REJECTED`.
   (`VERIFIED` — not "approved" — is the success state everywhere.)
 - **Manual admin review is authoritative.** Automated checks (OCR, heuristics)
-  may eventually *assist* the reviewer, but automation is never the final
-  authority for verification. No automated decisioning exists in v1.
-- A user cannot access **discovery, likes, passes, matching, or messaging**
-  until their verification status is `VERIFIED`.
-- Rejected users see their rejection reason and may resubmit.
-- Uploaded student ID documents are private: they are stored in private
-  storage, never publicly accessible, and viewable only by authorized
-  reviewers.
+  may eventually *assist* a reviewer, but automation is never the final
+  authority. No automated decisioning exists.
+- **A user cannot join opportunities, discover people, express interest, match,
+  or message until their verification status is `VERIFIED`.**
+- Rejected users see their rejection reason and may resubmit. Only one
+  `PENDING` submission exists at a time, and `VERIFIED` is terminal.
+- Submitted documents are private: private storage, never publicly accessible,
+  viewable only by authorized reviewers through short-lived signed URLs.
+  Student ID documents and profile photos live in separate buckets.
 
 ## Manual verification review workflow
 
-The system supports an internal verification review workflow (single trusted
-admin/reviewer in v1, designed so additional moderators/admins can be added
-later). A reviewer can:
+A single trusted admin/reviewer in v1, structured so more moderators can be
+added later without redesign. A reviewer can:
 
-- view pending verifications;
+- view pending verifications (metadata only — no document access by default);
 - securely view the submitted student ID;
-- approve → status becomes `VERIFIED`;
-- reject → status becomes `REJECTED`, with a required rejection reason;
-- see relevant verification metadata (submission time, user, document);
-- have every decision recorded in an audit trail (reviewer identity,
-  timestamp, decision, reason).
+- approve → `VERIFIED`;
+- reject → `REJECTED` with a required rejection reason;
+- see the student's claimed university, including a free-text institution name
+  when the university is not in the catalog;
+- rely on every decision being recorded in an append-only audit trail
+  (reviewer, decision, timestamp, reason).
 
-Review tooling is internal/admin-facing only and is not exposed to regular
-users.
+Decided submissions are immutable. Review tooling is internal and is never
+exposed to regular users.
 
-## Functional requirements
+## Profiles
 
-### Profiles
+Every user has **ONE** UniMatch profile. They do not create a profile per
+activity, and applying to an opportunity never creates a new profile.
 
-Users create/edit a dating profile containing:
+**Required:** first name · date of birth/age · university (catalog entry **or**
+a free-text name for an unlisted institution) · course · academic year ·
+gender · who you'd like to meet · bio · interests · at least one profile photo.
 
-**Required:** first name · date of birth/age · university · course · academic
-year · gender · gender/dating preferences · bio · interests · profile photos.
+**Optional:** height · hometown · profile prompts · social links ·
+`relationship_intent` (legacy field, see *Legacy dating fields*).
 
-**Optional:** height · hometown · relationship intent · profile prompts ·
-social links.
+**Motivation ("Why I'm here"):** an optional, controlled selection of up to
+three values from `dating`, `making_friends`, `confidence_and_communication`.
+The value set is enforced by a database constraint and is unchanged from the
+dating era — including `dating`, which stays a valid selection. Motivations
+are user self-description; they never appear as dating framing in the
+interface.
 
 Constraints:
 
-- Onboarding must stay short; collect only what is listed above.
+- Onboarding stays short and collects only what is listed above.
 - Date of birth is validated against the 18+ rule on every save.
-- University must be one of the supported universities (catalog), matched
-  against the submitted student ID during review.
-- Profile visibility rules: full profile visible to eligible/verified viewers
-  and to matches; submission content (student ID) is never part of the
-  profile.
+- University is either a catalog entry or a typed name; the reviewer compares
+  the claim against the submitted document.
+- Academic year is 1–6.
+- Interests: at most 8 in total across the shared catalog and user-created
+  custom interests. Custom names are 1–40 characters, unique per profile, and
+  may not duplicate a catalog entry.
+- Profile visibility: the client-safe person projection (photo, name, academic
+  context, interests, bio) is visible to eligible viewers inside an
+  opportunity and to matches. Submission content (student ID) is never part of
+  a profile.
+
+### Legacy dating fields
+
+`relationship_intent` still exists in the schema and is still returned in the
+client-safe person projection because removing it would be a destructive
+migration of live data. The interface does not surface it, no new copy refers
+to it, and its removal is a tracked follow-up. All *new* product surface is
+built opportunity-first.
 
 ### Photos
 
-- Multiple profile photos per user: **minimum 1, maximum 6** (final minimum
-  for unlocking the feed is confirmed during implementation).
+- Multiple photos per profile: **minimum 1, maximum 6**.
 - One photo is the **primary photo** (first in ordering).
 - Ordering is explicit and user-controlled; primary = lowest position.
-- Users can upload, delete, and reorder photos; upload places new photos at
-  the end of the order, delete promotes remaining photos, reorder swaps
-  positions.
-- Visibility: any signed-in viewer who is legitimately allowed to view that
-  profile (per discovery/match rules). Not public internet access.
-- Ownership: only the photo owner can mutate (upload/delete/reorder) their
-  own photos.
-- Storage: private bucket with authorized delivery; student IDs never mix
-  with profile photo storage.
+- Upload appends to the end of the order; delete promotes the remaining
+  photos; reorder takes a full permutation.
+- Server-side validation: magic-byte sniffing accepts JPEG/PNG/WebP, a
+  declared type that contradicts the bytes is rejected, max 10 MB.
+- Visibility: only to viewers legitimately allowed to see that profile (inside
+  an opportunity, or as a match). Never public internet access.
+- Ownership: only the owner can upload/delete/reorder.
+- Storage: private bucket, server-signed URLs, backend-proxied uploads; a
+  failed write never leaves an orphaned object behind.
 
-### Discovery
+## Opportunity catalog
 
-Verified users receive a feed of eligible candidate profiles. A candidate is
-**never shown** if the candidate is:
+Categories and activities are **data-driven reference data**, not hard-coded:
+
+```
+Categories      Sports · Events · Entertainment · Social · Travel
+Activities      Badminton · Dandiya · Movies · Rishikesh · …
+```
+
+- Administrators create, rename, reorder, enable/disable categories and
+  activities, and move an activity between categories — without schema or
+  frontend changes.
+- Categories are navigation and visual context; activities are what an
+  opportunity is actually about.
+- Users never write to the catalog. Only active categories and activities are
+  public.
+
+## Opportunities
+
+**Admin-created opportunities are the only opportunities.** Users cannot
+publish "I need someone to watch a movie" or "looking for a badminton partner".
+An administrator creates *Movie Night*; users discover it and join. This keeps
+the platform curated and safe instead of an uncontrolled feed of user requests.
+
+An opportunity carries:
+
+- title, category, (optional) activity, description
+- date, start time, end time, location
+- cover image, capacity, partner requirement, expiry
+- state
+
+States are exactly `DRAFT`, `PUBLISHED`, `PAUSED`, `CANCELLED`, `EXPIRED`,
+transitions only through explicit admin actions. **Only `PUBLISHED`
+opportunities are public**; pausing or cancelling one removes it from the
+public surface immediately. Drafts are never shown to users and non-published
+ids are indistinguishable from unknown ones.
+
+Form fields adapt to the selected category rather than forcing one universal
+form: sports surface a venue and a tournament frame, travel surfaces a
+destination and a date range, and so on.
+
+## Applications (participation)
+
+Joining is the whole bridge between "an opportunity exists" and "I can meet
+people through it".
+
+- Apply with the caller's **existing** profile — no new profile, no
+  repetitive form.
+- Requires `VERIFIED`; the opportunity must be `PUBLISHED`.
+- One application per person per opportunity; duplicates are rejected.
+- Withdrawing is a status transition (`APPLIED → WITHDRAWN`), never a deletion.
+- A student can join many opportunities at once and manages them from
+  "my activity".
+- Only `APPLIED` participants appear in each other's feeds.
+
+## Contextual discovery
+
+Inside a joined opportunity, a student browses the other people who joined it.
+
+A candidate is **never shown** if they are:
 
 - the current user;
-- unverified;
+- not `VERIFIED`;
 - blocked by the current user, or blocking the current user;
-- already passed, liked, matched, or unmatched by either side (i.e., anyone
-  whose outcome was already decided under product rules);
-- outside the current user's configured preferences.
+- someone the current user already acted on **in this same opportunity**.
 
-Preferences supported in v1:
+Acted-on-here is scoped to the opportunity on purpose: passing someone through
+one event does not remove them from the next one, and two people can connect
+independently through several opportunities.
 
-- age range (bounded below by 18+, defaults TBD);
-- gender/dating preference, applied two-sided where feasible.
+Preferences in v1: **who you'd like to meet** (`men` / `women` / `everyone`),
+applied two-sided — both sides' preferences are respected. Wording is neutral
+partner discovery, never a dating preference.
 
-Notes:
+Ranking is **deterministic and explainable** (newest profiles first, with a
+stable tiebreaker). No AI recommendation system, no random ordering, no
+location/geolocation discovery. Cross-university discovery is allowed.
 
-- Candidates span all verified universities in v1; location/geolocation-based
-  discovery is out of scope for v1.
-- Ranking is **deterministic and explainable** (e.g., recent activity/profile
-  completeness based). No complex AI recommendation system in v1.
+## Actions
 
-### Actions
-
-- Two actions: `LIKE` and `PASS`.
-- Acting on an already-decided candidate is rejected by the API.
+- Two actions inside an opportunity: **Interested** and **Pass**.
+- Actions are immutable and scoped to the opportunity; acting twice in the
+  same context is rejected by the API.
 - **Super Like: deferred** — not in v1.
-- **Undo/Rewind: deferred** — not in v1. Whether a pass can later be reversed
-  is a product decision tracked in Open questions.
-- No premium monetization, boosts, or paid features exist.
+- **Undo/Rewind: deferred** — not in v1.
+- "Who is interested in you" does not exist — incoming interest is never
+  readable.
+- No premium monetization, boosts, or paid features.
 
-### Matching
+## Matching
 
-- A match occurs when two eligible users mutually like each other.
-- Match creation is deduplicated: a pair can have at most one active match.
+- A match occurs when two eligible participants both express interest **in the
+  same opportunity**.
+- **Matches are contextual.** A match remembers why it happened and carries the
+  opportunity; the same two people may match again through a different
+  opportunity.
+- Creation is deduplicated: a pair can have at most one match per opportunity,
+  even under concurrent mutual interest.
 - Matches are visible only to the two participants.
 - **Unmatch:** either participant can unmatch. Unmatching hides the
-  conversation and its messages from both participants immediately. Existing
-  messages are retained server-side per data-retention/safety policy
-  (retention window TBD) but become inaccessible to both users.
-- In v1, unmatched pairs do **not** rematch through normal discovery.
+  conversation and its messages from both participants immediately. Rows are
+  retained server-side per the retention policy but become inaccessible to
+  both users, so an unmatched pair cannot rematch through normal discovery.
 
-### Messaging
+## Messaging
 
-- Only mutually matched, non-blocked users can message each other.
-- Conversations are 1:1, implicitly created by a match.
-- Messages: text-first (v1); timestamps server-assigned; ordering stable per
-  conversation.
-- Read state: conversations track read/unread per participant (unread counts
-  for the UI).
-- Typing state: ephemeral typing indicators delivered via Supabase Realtime;
-  typing state is not durable application data.
-- Message ownership & access control: senders can modify/hide only their own
-  messages; participants can read only conversations they belong to. All
-  enforced server-side.
-- Realtime transport is Supabase Realtime (messages, read receipts,
-  typing/presence); REST provides history and fallback sending.
+Chats exist to arrange the thing, not to replace it. UniMatch is deliberately
+**not** a permanent messaging platform.
 
-### Safety
+- Only mutually matched, non-blocked participants can message each other.
+- A conversation IS an active match (the match id doubles as the conversation
+  id), and it carries the opportunity the two people matched through.
+- Conversations are **temporary**: a conversation with no new message for 24
+  hours lapses and becomes inaccessible. Unmatching ends it immediately.
+- Messages are text-first, immutable in v1, with server-assigned timestamps and
+  stable ordering per conversation.
+- Read state: a simple per-participant unread counter for the UI (no per-message
+  read receipts).
+- Realtime transport, typing indicators, attachments, and push notifications
+  are **deferred**; v1 polls the open conversation.
+- All access is enforced server-side: participants only, own messages only.
 
-Minimum required behavior for v1 (no large moderation system):
+## Safety
 
-- **Block** another user. Blocking affects discovery (neither user appears in
-  the other's feed) and messaging (conversation inaccessible while blocked).
-  Blocking is reversible via unblock.
-- **Report** another user, optionally referencing specific content
-  (profile/message/photo). Reports include reporter identity, target, reason
-  category, and free-text detail; report contents are admin-only.
+Minimum required behavior, no large moderation system:
+
+- **Block** another user. A block is a pure visibility filter: the pair
+  disappears from discovery, actions, matches, and messaging in **both**
+  directions while it stands, and everything returns on unblock. Blocking is
+  reversible and silent for the blocked user.
+- **Report** another user, optionally referencing a specific profile, photo, or
+  message. Reports carry reporter, target, reason category, and free-text
+  detail; a report has no automatic consequence — admin review decides any
+  action. Report contents are admin-only and never returned to the reporter.
 - **Unmatch** as described under Matching.
-- Reports and blocks are reviewed by the same single-admin workflow as
-  verification in v1.
+- **Account suspension** (admin-only): an indefinite block or a timed
+  suspension. While suspended, an account can still read its own data but
+  cannot take any action or reach either discovery feed. Lapsed suspensions
+  expire automatically.
+- Reports and blocks are handled by the same single-admin workflow as
+  verification.
+
+## Admin console
+
+A **single** admin application under `/admin` — no separate top-level URLs to
+remember. It reuses the same student authentication and the same
+`staff_admins` membership check; frontend route hiding is never treated as
+security, and a normal user calling an admin API receives an authorization
+error.
+
+Areas:
+
+- **Overview** — real platform counts (users, verified, pending verifications,
+  opportunities, applications, matches, reports, active suspensions). Nothing
+  is fabricated.
+- **People & Verification** — the review queue, secure document viewing,
+  approve/reject.
+- **People** — searchable directory with verification and account status.
+- **Safety & Moderation** — reports, user-to-user blocks, suspensions.
+- **Opportunities** — create, edit, publish, pause, cancel, expire, delete,
+  and see who applied.
+- **Catalog** — categories and activities: create, rename, reorder,
+  enable/disable, move between categories.
+- **Account** — the signed-in staff member and sign-out.
+
+The directory exposes only what moderation needs. No invasive surveillance: no
+emails, no auth ids, no date of birth, no document access, no storage paths.
 
 ## Visual direction
 
-Mobile-first, clean, minimal, premium, photography-focused:
+Mobile-first, contextual, human, and deliberately *not* a generic SaaS
+dashboard. The governing principle is **context first, people second**: the user
+should always know what they are doing before they start browsing people.
 
-- Light/neutral backgrounds, dark typography, white cards
-- Subtle gray borders, rounded cards, minimal shadows
-- Restrained coral/red accent
-- Large profile photography, compact interest chips
-- Mobile-first layouts, bottom navigation where appropriate
-- Smooth, polished interactions
+Categories feel like different worlds within one identity, imagery carries the
+experience, motion is purposeful and restrained, and reduced-motion
+preferences are respected.
 
-The existing visual reference is inspiration for the visual language, **not**
-to be copied pixel-for-pixel.
-
-Explicitly avoided: purple gradients, AI-themed visuals, glowing effects,
-generic SaaS dashboard aesthetics, excessive glassmorphism.
+The full direction — including the opportunity card, swipe, match, navigation,
+typography, color, and imagery guidance — is in [DESIGN.md](DESIGN.md).
 
 ## Platform
 
@@ -208,24 +338,42 @@ generic SaaS dashboard aesthetics, excessive glassmorphism.
 - Backend: FastAPI/Python (Render) — shared by a future React Native app
 - Data: Supabase Postgres, Storage, Realtime, Auth
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the responsibility boundary
-between these components.
+Non-negotiables: the browser never touches privileged data; the service-role
+key lives only in the backend; every gate (18+, `VERIFIED`, match membership,
+photo ownership, opportunity participation, admin authorization) is enforced
+server-side and backed by Row Level Security where practical.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the responsibility boundary and
+[SECURITY.md](SECURITY.md) for the security model.
 
 ## Out of scope for v1
 
-Email/SMS verification, third-party KYC, Super Like, undo/rewind, payments or
-any monetization, AI features, campus events/social feeds, geolocation
-discovery, group chats, moderation dashboards beyond the minimal review
-workflow, push notifications (in-app notification records only).
+- **User-created partner/group listings**, including group proposals with
+  admin approval — *planned but not built; no schema or API exists.*
+- Email/SMS verification, third-party KYC.
+- Super Like, undo/rewind.
+- Payments or any monetization.
+- AI features, recommendation algorithms.
+- Campus events/social feeds as a product surface.
+- Geolocation discovery, age-range preferences.
+- Group chats.
+- Moderation beyond the review workflow described above.
+- Push notifications, Realtime streaming, attachments.
+- "Who is interested in you".
 
 ## Open questions (product decisions)
 
 1. Can a pass be reversed later, or is a pass final until account deletion?
    (v1 assumes final.)
-2. Exact default age-range preference and whether candidates outside a user's
-   range can ever be surfaced.
-3. Minimum photo count required to unlock discovery (PRD assumes 1).
-4. Cross-university discovery allowed by default? (PRD assumes yes.)
-5. Retention window for conversation content after unmatch or account
-   deletion.
-6. Notification channels after in-app records (push/email) — post-v1.
+2. Exact default age-range preference, and whether candidates outside a user's
+   range can ever be surfaced. (v1 has no age range at all.)
+3. Should user-created **group** proposals (with vacancies) be added behind an
+   admin approval queue, and if so how vacancies behave relative to the
+   fixed-capacity opportunities that exist today?
+4. Retention window for conversation content after a 24-hour lapse, after an
+   unmatch, and after account deletion.
+5. Notification channels after in-app records (push/email) — post-v1.
+6. Removal of the legacy `relationship_intent` field now that the interface
+   never surfaces it.
+7. Whether `motivations` should keep the `dating` value indefinitely or be
+   re-worded — the enum is a data contract, so changing it is a migration.

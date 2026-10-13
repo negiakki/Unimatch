@@ -10,15 +10,16 @@
   only by authorized reviewers via short-lived signed URLs generated
   server-side (FastAPI) after checking reviewer authorization.
 - **18+ only.** Date of birth is collected at signup and validated
-  server-side; users under 18 can never create or use a dating profile.
+  server-side; users under 18 can never create or use a UniMatch profile.
   Client-side checks are UX affordances only.
 - **Verification gate.** Discovery, likes, passes, matching, and messaging
   require verification status `VERIFIED`, enforced in FastAPI and again via
   Row Level Security — never trusted from the client.
 - **Server-side authorization.** All authorization-sensitive operations
-  (dating actions, discovery rules, matching, verification workflow,
-  moderation) are performed/authorized by FastAPI. Hiding UI elements client-
-  side is never the security control. Reviewer/admin capability is checked
+  (opportunity applications, interest and pass actions, discovery rules,
+  matching, verification workflow, moderation) are performed/authorized by
+  FastAPI. Hiding UI elements client-side is never the security control.
+  Reviewer/admin capability is checked
   server-side before any privileged Supabase call; v1 has one trusted admin,
   designed to extend to multiple moderators (mechanism TBD).
 - Database access is deny-by-default via **Row Level Security**; policies are
@@ -155,15 +156,26 @@
 - CORS restricted to an explicit origin allow-list (`CORS_ORIGINS`).
 - Uniform error envelope that never leaks stack traces; unexpected exceptions
   log server-side and return a generic message.
-- No PII is stored yet — the health endpoint is the only surface.
+- PII is stored in Supabase: profile and account data, verification
+  submissions, photo and document references, conversation content, and
+  moderation records. Those tables are deny-by-default under RLS and reachable
+  only through authenticated, server-authorized routes; the only tables readable
+  by `anon` are the PII-free public reference data (`universities`,
+  `interests`, `categories`, `activities`) and `PUBLISHED` opportunities.
+  Student ID documents and profile photos stay in private buckets and are
+  served only through short-lived signed URLs generated server-side.
 
 ## To be designed with future features
 
 - Admin/moderator authorization model details and role escalation beyond the
   single v1 admin. The database side exists (`staff_admins` registry + FK
-  enforcement); the FastAPI-side membership check and any reviewer-facing
-  tooling come with the review workflow implementation.
-- Rate limiting / abuse controls for uploads, swipes, and messaging.
+  enforcement) and the FastAPI-side membership check is implemented: every
+  admin route depends on `CurrentStaffUserDep`, which resolves the bearer token
+  to an auth user and verifies `staff_admins` membership with the service-role
+  client (401 unauthenticated, 403 authenticated non-staff). What remains is
+  role escalation beyond one uniform reviewer tier.
+- Rate limiting / abuse controls for uploads, discovery actions, and
+  messaging.
 - Session refresh middleware pattern for Next.js + Supabase Auth.
 - JWT validation middleware specifics on FastAPI protected routes.
 - Data-retention implementation for unmatched conversations, deleted
