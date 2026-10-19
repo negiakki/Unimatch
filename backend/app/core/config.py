@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     supabase_service_role_key: str = ""
 
+    # Server-side Supabase HTTP transport. The Supabase client is shared
+    # process-wide across FastAPI's worker threads, so one HTTP/1.1 connection
+    # pool backs every concurrent request (HTTP/2 is deliberately disabled: a
+    # single multiplexed connection shared by many threads is what produced the
+    # intermittent transport failures). These values are the calibration knob
+    # for the deployed environment; see `app.services.supabase`.
+    supabase_http_timeout_seconds: float = 20.0
+    supabase_http_max_connections: int = 20
+    supabase_http_max_keepalive_connections: int = 10
+    # Total attempts (the first try included) for an idempotent request.
+    supabase_http_max_attempts: int = 2
+
     # Student ID verification document storage (private bucket; server-side only).
     verification_bucket_name: str = "verification-documents"
     verification_max_upload_bytes: int = 10 * 1024 * 1024
