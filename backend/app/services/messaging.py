@@ -26,8 +26,11 @@ Security model (mirrors the dating/discovery slices):
     conversations surface the same 404 as unauthorized ones — for reads and
     read-markers. Sending to an expired conversation is the restart path:
     the atomic RPC deletes its old messages, resets the window, then
-    inserts; the match itself stays intact. Cleanup (pg_cron) deletes
-    expired rows later; the RLS/backend rules stay authoritative meanwhile.
+    inserts; the match itself stays intact. The scheduled cleanup deletes
+    expired rows at the same 24h boundary; the RLS/backend rules stay
+    authoritative meanwhile. Rows retained only for an OPEN report are
+    marked `expired_at` and are filtered out of participant history even
+    after a restart (staff still reach them through the service role).
   * Sending runs through one atomic RPC that also increments the recipient's
     unread counter; mark-read zeroes the caller's counter (service role).
 """
@@ -64,7 +67,8 @@ MESSAGES_MAX_LIMIT = 100
 # message. Inactivity is measured from `matches.last_message_at` (reset by
 # every send); NULL = no messages yet = never active. The same rule is
 # re-enforced here AND in RLS (the service role bypasses RLS, so the backend
-# re-implements every rule); pg_cron cleanup deletes expired rows later.
+# re-implements every rule); the scheduled cleanup deletes expired rows at the
+# same 24h boundary.
 CONVERSATION_ACTIVE_WINDOW = timedelta(hours=24)
 
 _MESSAGE_COLUMNS = "id,sender_profile_id,body,created_at"
@@ -219,6 +223,9 @@ def get_messages(
             supabase.table("messages")
             .select(_MESSAGE_COLUMNS)
             .eq("match_id", str(match_id))
+            # Report-pinned rows from an earlier round stay for staff review
+            # but are never part of participant history again.
+            .is_("expired_at", "null")
         )
         if keyset_filter:
             query = query.or_(keyset_filter)

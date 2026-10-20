@@ -459,6 +459,7 @@ in either direction are hidden from both participants while the block stands
       "id": "0b8f7c2e-…",
       "opportunity": { "id": "…", "title": "Dandiya Night", "category": { "…": "…" }, "activity": { "…": "…" } },
       "created_at": "2026-10-08T10:00:00+00:00",
+      "chat_expired": false,
       "profile": { "…same client-safe person shape as the discovery feed…": "…" }
     }
   ]
@@ -468,6 +469,15 @@ in either direction are hidden from both participants while the block stands
 `profile` is the **other** participant as a client-safe projection. `opportunity`
 is the same minimal context object returned by the interest endpoint; it is
 `null`/absent for a match created before opportunity scoping existed.
+
+`chat_expired` is `true` once the conversation's 24-hour inactivity window has
+lapsed (`last_message_at` is more than 24 hours old). The match itself stays
+listed and active, but every conversation endpoint returns **404 `not_found`**
+for it. Sending a new message (the normal `POST /conversations/{id}/messages`
+path) deletes the old messages and starts a fresh, empty chat with the same
+match/conversation id. `chat_expired` is `false` for a match with no messages
+yet. Clients use it to label the action "Start new chat" instead of "Message"
+and to show the expired-chat restart state rather than a generic closed state.
 Unmatched matches are never returned; the row is retained server-side so an
 unmatched pair cannot rematch through normal discovery. "Who is interested in
 you" does not exist — incoming interest is never readable.
@@ -498,8 +508,9 @@ Chats are **temporary and contextual**: a conversation IS an active match (the
 match id doubles as the conversation id), and it carries the opportunity the
 two people matched through. A conversation is **active for 24 hours** — no
 message within the window lapses it; the match stays, the conversation becomes
-inaccessible (every endpoint then returns 404). Unmatching makes the
-conversation inaccessible immediately, with rows retained.
+inaccessible (every endpoint then returns 404), and its messages are deleted.
+Either participant can send again to start a fresh, empty chat. Unmatching
+makes the conversation inaccessible immediately, with rows retained.
 
 REST for history/sending/read markers. Live transport is **deferred**: v1
 polls the open conversation (~every 5s) — no Realtime, typing indicators,

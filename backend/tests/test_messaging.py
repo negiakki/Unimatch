@@ -274,7 +274,8 @@ class FakeRpc:
 
         # Mirror the RPC's expiry reset: an expired conversation starts
         # fresh — old messages are deleted (never reappear), stale counters
-        # are zeroed.
+        # are zeroed. OPEN-report survivors stay for staff but are marked
+        # expired so they can never re-enter participant history.
         if _rpc_conversation_expired(match):
             OPEN_PINNED = fake.state.get("open_reported_message_ids", set())
             fake.tables["messages"] = [
@@ -282,6 +283,9 @@ class FakeRpc:
                 for m in fake.tables["messages"]
                 if m["match_id"] != match_id or m["id"] in OPEN_PINNED
             ]
+            for old in fake.tables["messages"]:
+                if old["match_id"] == match_id and not old.get("expired_at"):
+                    old["expired_at"] = _rpc_now_iso(fake.state)
             match["user_a_unread_count"] = 0
             match["user_b_unread_count"] = 0
 
@@ -1051,6 +1055,77 @@ def test_unread_counters_restart_after_expiry_reset(client, fake):
     assert match["user_b_unread_count"] == 0
 
 
+def test_reported_expired_message_never_reappears_after_restart(client, fake):
+    """OPEN-report survivors stay for staff but are permanently outside the
+    participants' history, even after a send resets the 24h window."""
+    assert send(client, "reported old message").status_code == 201
+    reported_id = fake.tables["messages"][0]["id"]
+    fake.state["open_reported_message_ids"] = {reported_id}
+    _expire(fake)
+
+    # The expired conversation is inaccessible before the restart.
+    assert list_messages(client).status_code == 404
+
+    # The restart deletes ordinary rows, retains the reported row, and starts
+    # a fresh visible history.
+    assert send(client, "fresh start").status_code == 201
+    page = list_messages(client).json()
+    assert [m["body"] for m in page["messages"]] == ["fresh start"]
+
+    # The retained row still exists for staff/service-role review, marked as
+    # outside participant history.
+    retained = [m for m in fake.tables["messages"] if m["id"] == reported_id]
+    assert len(retained) == 1
+    assert retained[0]["body"] == "reported old message"
+    assert retained[0]["expired_at"]
+
+
+def test_history_filters_expired_rows_even_with_a_fresh_window(client, fake):
+    """Defense-in-depth: a retained reported row is hidden by the backend's
+    own filter, not only by the restart RPC that marks it."""
+    fake.tables["matches"][0]["last_message_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).isoformat()
+    fake.tables["messages"] = [
+        {
+            "id": str(uuid4()),
+            "match_id": str(MATCH_ID),
+            "sender_profile_id": str(PARTNER_PROFILE_ID),
+            "body": "retained report evidence",
+            "created_at": "2026-08-29T09:00:00+00:00",
+            "expired_at": "2026-08-30T09:00:00+00:00",
+        },
+        {
+            "id": str(uuid4()),
+            "match_id": str(MATCH_ID),
+            "sender_profile_id": str(PARTNER_PROFILE_ID),
+            "body": "current message",
+            "created_at": "2026-08-30T09:00:00+00:00",
+            "expired_at": None,
+        },
+    ]
+
+    page = list_messages(client).json()
+    assert [m["body"] for m in page["messages"]] == ["current message"]
+
+
+def test_both_participants_can_send_after_expiry_without_losing_messages(client, fake):
+    """A restart then a reply are both committed: the second send must not
+    treat the freshly restarted chat as expired again."""
+    assert send(client, "old round").status_code == 201
+    _expire(fake)
+
+    assert send(client, "restart from viewer").status_code == 201
+    assert send(client, "reply from partner", headers=PARTNER_HEADERS).status_code == 201
+
+    page = list_messages(client).json()
+    assert [m["body"] for m in page["messages"]] == [
+        "reply from partner",
+        "restart from viewer",
+    ]
+    assert all(m["body"] != "old round" for m in fake.tables["messages"])
+
+
 def test_expiry_preserves_block_and_unmatch_semantics(client, fake):
     # A blocked (or unmatched) conversation is 404 regardless of expiry;
     # expiry must not change those rules.
@@ -1067,4 +1142,86 @@ def test_expiry_preserves_block_and_unmatch_semantics(client, fake):
     assert send(client, "hi again").status_code == 404
     # Unblock: expiry (not the block) keeps it inaccessible.
     fake.tables["blocks"].clear()
+    assert list_messages(client).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 9. Match card chat status — the matches list must agree with messaging.
+# ---------------------------------------------------------------------------
+
+
+def _matches(client, headers=AUTH_HEADERS):
+    resp = client.get("/api/v1/matches", headers=headers)
+    assert resp.status_code == 200
+    return resp.json()["matches"]
+
+
+def test_active_match_reports_an_open_chat(client, fake):
+    assert send(client, "still here").status_code == 201
+    fake.tables["matches"][0]["last_message_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=23)
+    ).isoformat()
+
+    matches = _matches(client)
+    assert len(matches) == 1
+    assert matches[0]["chat_expired"] is False
+    assert list_messages(client).status_code == 200
+
+
+def test_expired_match_stays_listed_but_reports_chat_expired(client, fake):
+    assert send(client, "long gone").status_code == 201
+    _expire(fake)
+
+    matches = _matches(client)
+    assert len(matches) == 1
+    assert matches[0]["id"] == str(MATCH_ID)
+    assert matches[0]["chat_expired"] is True
+    # The expired conversation itself remains inaccessible (unchanged rule).
+    assert list_messages(client).status_code == 404
+
+
+def test_start_new_chat_from_expired_match_replaces_old_history(client, fake):
+    """The "Start new chat" action is the existing send-after-expiry path: the
+    match id is reused, the old round is deleted, and only the fresh message is
+    ever served afterwards."""
+    assert send(client, "long gone").status_code == 201
+    _expire(fake)
+    assert _matches(client)[0]["chat_expired"] is True
+
+    resp = send(client, "hello again")
+    assert resp.status_code == 201
+
+    # Same match/conversation id, now open again.
+    matches = _matches(client)
+    assert len(matches) == 1
+    assert matches[0]["id"] == str(MATCH_ID)
+    assert matches[0]["chat_expired"] is False
+
+    # Fresh server history only — the expired round cannot be reintroduced.
+    page = list_messages(client).json()
+    assert [m["body"] for m in page["messages"]] == ["hello again"]
+    assert all(m["body"] != "long gone" for m in fake.tables["messages"])
+
+    # The restarted conversation is listed again with the caller's unread at 0.
+    conversations = client.get(CONVERSATIONS_API, headers=AUTH_HEADERS).json()[
+        "conversations"
+    ]
+    assert [c["id"] for c in conversations] == [str(MATCH_ID)]
+    assert conversations[0]["unread_count"] == 0
+
+
+def test_unmatched_and_blocked_matches_are_not_listed(client, fake):
+    fake.tables["blocks"].append(
+        {
+            "id": str(uuid4()),
+            "blocker_profile_id": str(PARTNER_PROFILE_ID),
+            "blocked_profile_id": str(VIEWER_PROFILE_ID),
+        }
+    )
+    assert _matches(client) == []
+    assert list_messages(client).status_code == 404
+
+    fake.tables["blocks"].clear()
+    assert client.delete(f"/api/v1/matches/{MATCH_ID}", headers=AUTH_HEADERS).status_code == 200
+    assert _matches(client) == []
     assert list_messages(client).status_code == 404

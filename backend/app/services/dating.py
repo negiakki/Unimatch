@@ -55,6 +55,7 @@ from app.services.discovery import (
     _photos_by_profile,
     _candidate_payload,
 )
+from app.services.messaging import _conversation_is_expired
 from app.services.opportunities import require_published_opportunity
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ def like_candidate(
         "match": {
             "id": match["id"],
             "created_at": match.get("created_at"),
+            "chat_expired": False,
             "profile": _matched_profile_payload(
                 supabase, target, bucket=bucket, signed_url_ttl=signed_url_ttl
             ),
@@ -165,6 +167,7 @@ def like_in_opportunity(
             "id": match["id"],
             "opportunity": _opportunity_context(supabase, opportunity_id),
             "created_at": match.get("created_at"),
+            "chat_expired": False,
             "profile": _matched_profile_payload(
                 supabase, target, bucket=bucket, signed_url_ttl=signed_url_ttl
             ),
@@ -458,7 +461,9 @@ def list_matches(
     try:
         response = (
             supabase.table("matches")
-            .select("id,user_a_id,user_b_id,opportunity_id,created_at")
+            .select(
+                "id,user_a_id,user_b_id,opportunity_id,created_at,last_message_at"
+            )
             .is_("unmatched_at", "null")
             .or_(f"user_a_id.eq.{viewer_id},user_b_id.eq.{viewer_id}")
             .order("created_at", desc=True)
@@ -506,6 +511,7 @@ def list_matches(
         entry: dict[str, Any] = {
             "id": str(row["id"]),
             "created_at": row.get("created_at"),
+            "chat_expired": _conversation_is_expired(row),
             "profile": _candidate_payload(
                 profile,
                 interests_by_profile.get(partner_id, []),

@@ -20,6 +20,8 @@ import type { OpportunityContext } from "@/lib/api/opportunities";
 export interface ContextualMatch {
   id: string;
   created_at: string | null;
+  /** True once the 24h messaging window has lapsed; the match stays listed. */
+  chat_expired: boolean;
   /** The opportunity this match belongs to — present for V1 matches. */
   opportunity?: OpportunityContext | null;
   profile: Person;

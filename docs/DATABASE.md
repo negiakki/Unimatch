@@ -30,11 +30,12 @@ Slices, in migration order:
 | Contextual matching | `20261006150000_contextual_matching.sql` | `dating_actions.opportunity_id`, `matches.opportunity_id` |
 | Suspensions & report context | `20261006160000_suspensions_reports.sql` | `suspensions`, `reports.content_type += 'opportunity'` |
 | Custom university | `20261007120000_custom_university.sql` | `profiles.custom_university_name`, exactly-one university claim |
+| 24h deletion | `20261020120000_conversation_expiry_24h.sql` | deletes at the 24h boundary (no extra retention), `messages.expired_at`, report-safe restart, pg_cron schedule |
 
 ## How the schema is managed
 
 - PostgreSQL via Supabase; migrations live in `supabase/migrations/` and are
-  applied with the Supabase CLI. Nineteen migrations exist (table above);
+  applied with the Supabase CLI. Twenty migrations exist (table above);
   later slices never modify earlier migrations.
 - Development seed data (fictional universities + interests only) lives in
   `supabase/seed.sql`; the Supabase CLI applies it after migrations on
@@ -636,6 +637,7 @@ Realtime is deferred; clients poll (~5s).
 | `sender_profile_id` | uuid NOT NULL | FK → `profiles(id)` ON DELETE CASCADE |
 | `body` | text NOT NULL | CHECK: `body = btrim(body) AND char_length(body) BETWEEN 1 AND 2000` |
 | `created_at` | timestamptz NOT NULL | default `now()`; server-assigned |
+| `expired_at` | timestamptz NULL | set when a report-pinned message survives its conversation's expiry; excluded from participant reads forever |
 
 - Messages are immutable in v1: no UPDATE/DELETE grants or policies; there is
   no edit/delete path anywhere (backend included).
@@ -673,22 +675,68 @@ runs late:
 
 1. **RLS** — messages are readable only while the conversation is active
    (`last_message_at IS NULL OR last_message_at >= now() - interval '24
-   hours'`). Expired messages are invisible to participants immediately,
-   with identical non-existence behavior to an unauthorized conversation.
+   hours'`) and `expired_at IS NULL`. Expired messages are invisible to
+   participants immediately, with identical non-existence behavior to an
+   unauthorized conversation.
 2. **The send RPC** — when the conversation has already lapsed, its old
    messages are deleted **first** (unless held by an `OPEN` report), stale
    unread counters are zeroed, then the new message is inserted, the window
-   resets to it, and the recipient's counter ticks — all in one transaction.
-   Expired content can therefore **never reappear**: there is no soft-delete
-   and no resurrect path.
+   resets to it, and the recipient's counter ticks — all in one transaction
+   while holding the match row lock. Expired content can therefore **never
+   reappear**: there is no soft-delete and no resurrect path. Report-pinned
+   survivors are marked `expired_at`, so a restart cannot make them visible.
+   The migration also backfills rows retained under the old 48h policy (any
+   round before the latest >24h gap) so they stay out of participant history
+   while remaining available to staff.
 3. **Cleanup** — `public.expire_stale_conversations()` (service role only)
-   removes messages of conversations expired for more than a further 24 hours
-   (48 h total, so cleanup is always strictly later than enforcement) and
-   zeroes both counters. Messages referenced by an `OPEN` report are never
-   deleted, and the counters are left alone while such a message still pins
-   them. Scheduled hourly via `pg_cron` (`unimatch-expire-stale-conversations`)
-   when that extension is enabled; enabling it is a manual step on hosted
-   Supabase and the migration is a no-op without it.
+   physically deletes ordinary messages **at the same 24h boundary** — there
+   is no extra retention window — and zeroes both counters. It locks
+   each expired match with `FOR UPDATE SKIP LOCKED`, so it can never race a
+   send/restart. Messages referenced by an `OPEN` report are never deleted;
+   they are marked `expired_at` instead, remaining available only to staff
+   through the service role. Scheduled every five minutes via `pg_cron`
+   (`unimatch-expire-stale-conversations`).
+
+#### `pg_cron` scheduling and failure modes
+
+The migration attempts `create extension pg_cron with schema pg_catalog` when
+the extension is absent, then schedules (or reschedules) the cleanup job.
+Scheduling is **fail-closed**:
+
+- **Extension cannot be created** (role lacks permission / extension not
+  available): the migration aborts and rolls back. It is not recorded as
+  applied, so the 24h deletion policy cannot go live without background
+  cleanup.
+- **Extension exists but grants/unschedule/schedule fail** (for example the
+  job was created by a different role): the exception is not swallowed, so the
+  migration aborts and is not recorded as applied. No partial schedule is
+  left behind.
+- **Extension exists but is not preloaded** (no scheduler process): the job
+  row is created but never runs. This is only observable in the hosted
+  project and must be checked after applying.
+
+Hosted Supabase does not always let the migration role enable `pg_cron`; if it
+cannot, enable it once in the Dashboard (Database → Extensions) or with
+`create extension pg_cron with schema pg_catalog;`, then rerun/repair the
+migration. Verify the job with:
+
+```sql
+select jobid, jobname, schedule, command, active
+from cron.job
+where jobname = 'unimatch-expire-stale-conversations';
+
+select status, start_time, end_time, return_message
+from cron.job_run_details
+where jobid = (
+  select jobid from cron.job
+  where jobname = 'unimatch-expire-stale-conversations'
+)
+order by start_time desc
+limit 5;
+```
+
+`active = true`, a `*/5 * * * *` schedule, and recent successful run details
+are the proof that cleanup is actually scheduled and running.
 
 Expiry never unmatches or hides the match — only the messages lapse. Blocked
 and unmatched conversations keep their existing inaccessibility semantics.
@@ -709,8 +757,8 @@ bearer token.
 
 #### `expire_stale_conversations()`
 
-Returns the number of messages deleted. `service_role` only. Statements inside
-share one transaction, so cleanup is atomic.
+Returns the number of expired matches cleaned. `service_role` only. Statements
+inside share one transaction, so cleanup is atomic.
 
 ### Row Level Security (messaging slice)
 
@@ -746,8 +794,9 @@ counter increments in both directions, the RPC's participant + active-match +
 no-block enforcement (nonparticipant, unmatched, and blocked senders refused,
 nothing inserted), the expiry reset (send-after-expiry deletes old messages
 first, zeroes stale counters, and old content never reappears), the cleanup
-function's 48h window and its refusal to delete messages pinned by an `OPEN`
-report, service-role-only EXECUTE, immediate inaccessibility after unmatch (with
+function's **24h** window and its refusal to delete messages pinned by an
+`OPEN` report (those are marked expired and hidden from participants),
+service-role-only EXECUTE, immediate inaccessibility after unmatch (with
 rows retained and access restorable), the keyset and expiry indexes, and
 match-deletion cascading messages away.
 
@@ -1166,9 +1215,12 @@ existing tables. Everything above is implemented.
 - **`capacity` is unenforced.** `opportunities.capacity` is validated as a
   positive integer but nothing closes applications at the limit; managing the
   participant list is a product decision.
-- **Conversation expiry cleanup requires `pg_cron`.** On hosted Supabase the
-  extension must be enabled once by hand; without it, enforcement still holds
-  (RLS + the send RPC) and only the row reclamation is deferred.
+- **Conversation expiry cleanup requires `pg_cron`.** The 24h migration tries
+  to enable it automatically and **aborts** if the extension cannot be created
+  or the cleanup job cannot be scheduled. Enable `pg_cron` once in the
+  Dashboard (or with `create extension pg_cron with schema pg_catalog;`), then
+  rerun the migration. Confirm the job in `cron.job` and recent runs in
+  `cron.job_run_details` (queries above).
 - **Legacy `NULL` opportunity rows.** Actions and matches created before the
   contextual-matching slice keep `opportunity_id IS NULL` and therefore carry
   no per-opportunity uniqueness guarantee. They remain valid and readable; the

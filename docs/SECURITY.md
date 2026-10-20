@@ -137,9 +137,11 @@
 
 - Users can delete their account; deletion must remove or irreversibly
   anonymize PII: profile data, photos (storage objects), date of birth, likes/
-  passes, conversation participation. Retention windows for residual data
-  (e.g., messages needed for safety investigations) are **TBD** product
-  decisions tracked in [PRD.md](PRD.md).
+  passes, conversation participation. Conversation content is deleted at the
+  24-hour inactivity boundary; messages held by an `OPEN` moderation report
+  are retained as evidence but never shown to participants again. Other
+  residual-data retention windows are **TBD** product decisions tracked in
+  [PRD.md](PRD.md).
 - Student ID documents are deleted with the account (submission rows cascade
   from the profile; the Storage objects themselves are cleaned up by the app
   layer). Verification audit records currently cascade away with the account

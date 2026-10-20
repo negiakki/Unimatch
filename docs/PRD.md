@@ -371,7 +371,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the responsibility boundary and
    admin approval queue, and if so how vacancies behave relative to the
    fixed-capacity opportunities that exist today?
 4. Retention window for conversation content after a 24-hour lapse, after an
-   unmatch, and after account deletion.
+   unmatch, and after account deletion. (V1 decision: messages are deleted at
+   the 24-hour lapse; rows held by an OPEN moderation report are retained as
+   evidence but permanently hidden from participants. Unmatched conversations
+   stay stored and inaccessible, matching the unmatch/restore behavior.)
 5. Notification channels after in-app records (push/email) — post-v1.
 6. Removal of the legacy `relationship_intent` field now that the interface
    never surfaces it.

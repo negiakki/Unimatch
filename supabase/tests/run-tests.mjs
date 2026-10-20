@@ -33,6 +33,20 @@ assert.ok(
 const migrationSqls = migrationFiles.map((f) => readFileSync(join(migrationDir, f), 'utf8'));
 const seedSql = readFileSync(join(here, '..', 'seed.sql'), 'utf8');
 
+const EXPIRY_24H_MIGRATION = '20261020120000_conversation_expiry_24h.sql';
+const expiry24hIndex = migrationFiles.indexOf(EXPIRY_24H_MIGRATION);
+assert.ok(expiry24hIndex >= 0, `missing migration ${EXPIRY_24H_MIGRATION}`);
+const expiry24hSql = migrationSqls[expiry24hIndex];
+
+// Applies every migration BEFORE the 24h slice to an isolated database, so a
+// migration-level failure can be exercised without touching the main fixture
+// database.
+async function applyMigrationsBeforeExpiry(targetDb) {
+  for (let i = 0; i < expiry24hIndex; i += 1) {
+    await targetDb.exec(migrationSqls[i]);
+  }
+}
+
 // --- database ---------------------------------------------------------------
 const db = new PGlite(); // in-memory PostgreSQL
 
@@ -87,9 +101,9 @@ async function expectFailure(run, ...needles) {
   assert.fail('expected the statement to fail, but it succeeded');
 }
 
-// --- setup: Supabase Auth emulation + migration -----------------------------
-await actAsService();
-await exec(`
+// --- setup: Supabase Auth + pg_cron emulation, then migrations --------------
+// Shared by the main database and the isolated failure-mode databases below.
+const bootstrapSql = `
   create schema if not exists auth;
   create table if not exists auth.users (
     id         uuid primary key default gen_random_uuid(),
@@ -143,7 +157,53 @@ await exec(`
   grant usage on schema storage to anon, authenticated, service_role;
   grant select, insert, update, delete on storage.objects to anon, authenticated;
   grant all on storage.objects to service_role;
-`);
+`;
+
+// Minimal pg_cron emulation: the migration only needs the job table and the
+// schedule/unschedule functions. Test-only; hosted Supabase supplies the real
+// extension. This lets the success and failure paths run locally.
+const fakeCronSql = `
+  create schema if not exists cron;
+  create table if not exists cron.job (
+    jobid    bigserial primary key,
+    jobname  text not null unique,
+    schedule text not null,
+    command  text not null,
+    active   boolean not null default true
+  );
+  create or replace function cron.schedule(
+    job_name text,
+    schedule text,
+    command text
+  ) returns bigint
+  language plpgsql
+  as $fn$
+  declare
+    v_jobid bigint;
+  begin
+    insert into cron.job (jobname, schedule, command)
+    values (job_name, schedule, command)
+    on conflict (jobname) do update
+      set schedule = excluded.schedule,
+          command = excluded.command
+    returning jobid into v_jobid;
+    return v_jobid;
+  end;
+  $fn$;
+  create or replace function cron.unschedule(job_name text)
+  returns boolean
+  language plpgsql
+  as $fn$
+  begin
+    delete from cron.job where jobname = job_name;
+    return found;
+  end;
+  $fn$;
+`;
+
+await actAsService();
+await exec(bootstrapSql);
+await exec(fakeCronSql);
 
 // Apply every migration exactly as the Supabase CLI would (filename order).
 for (const sql of migrationSqls) {
@@ -2962,10 +3022,10 @@ test('74 · expiry: send-after-expiry deletes old messages first (fresh start)',
   assert.deepEqual(history.map((r) => r.body), ['fresh start']);
 });
 
-test('75 · expiry: cleanup deletes expired messages and zeroes counters (OPEN reports survive)', async () => {
+test('75 · expiry: cleanup deletes at 24h and keeps OPEN-report rows out of participant history', async () => {
   await actAsService();
-  // Age the conversation fully past the cleanup window (48h).
-  await one(`update public.matches set last_message_at = now() - interval '49 hours' where id = $1 returning 1`, [expMatchId]);
+  // Age just past the single 24h boundary — there is no extra retention.
+  await one(`update public.matches set last_message_at = now() - interval '25 hours' where id = $1 returning 1`, [expMatchId]);
   await rows(
     `insert into public.messages (match_id, sender_profile_id, body)
      values ($1, $2, 'reported content'), ($1, $2, 'ordinary expired')`,
@@ -2986,16 +3046,19 @@ test('75 · expiry: cleanup deletes expired messages and zeroes counters (OPEN r
   assert.ok(cleaned.n >= 1, 'the expired conversation must be cleaned');
 
   // Ordinary expired messages are gone; the OPEN-reported message survives…
-  const remaining = await rows(`select body from public.messages where match_id = $1`, [expMatchId]);
+  const remaining = await rows(
+    `select body, expired_at from public.messages where match_id = $1`,
+    [expMatchId]
+  );
   assert.deepEqual(remaining.map((r) => r.body), ['reported content']);
-  // …and the counters are NOT zeroed while a pinned message remains
-  // (staff context preserved; unmatch semantics untouched).
+  assert.notEqual(remaining[0].expired_at, null, 'pinned survivor must be marked expired');
+  // …the chat is over, so its unread counters are reset.
   const counters = await one(
     `select user_a_unread_count, user_b_unread_count from public.matches where id = $1`,
     [expMatchId]
   );
-  assert.equal(counters.user_a_unread_count, 3);
-  assert.equal(counters.user_b_unread_count, 5);
+  assert.equal(counters.user_a_unread_count, 0);
+  assert.equal(counters.user_b_unread_count, 0);
 
   // The reported message is still invisible to ordinary users (expired)…
   await actAs(expUserB.id);
@@ -3008,11 +3071,34 @@ test('75 · expiry: cleanup deletes expired messages and zeroes counters (OPEN r
   await actAsService();
   assert.equal((await rows(`select id from public.messages where id = $1`, [reported.id])).length, 1);
 
-  // Close the report → cleanup may remove it and then zero the counters.
+  // A restart must not revive the retained report row in participant history.
+  const restarted = await one(
+    `select * from public.send_conversation_message($1, $2, 'restarted after cleanup')`,
+    [expMatchId, expProfileA.id]
+  );
+  await actAs(expUserB.id);
+  const afterRestart = await rows(
+    `select body from public.messages where match_id = $1 order by created_at`,
+    [expMatchId]
+  );
+  assert.deepEqual(afterRestart.map((r) => r.body), ['restarted after cleanup']);
+
+  // A completed restart resets the window; cleanup must leave its message alone.
+  await actAsService();
+  await one(`select public.expire_stale_conversations()`);
+  assert.equal(
+    (await rows(`select id from public.messages where id = $1`, [restarted.id])).length,
+    1,
+    'cleanup must never delete a message from a completed restart'
+  );
+
+  // Age that round too, then close the report → cleanup removes everything.
+  await one(`update public.matches set last_message_at = now() - interval '25 hours' where id = $1 returning 1`, [expMatchId]);
   await one(`update public.reports set status = 'DISMISSED' where content_id = $1 returning 1`, [reported.id]);
   const cleanedAgain = await one(`select public.expire_stale_conversations() as n`);
   assert.ok(cleanedAgain.n >= 1);
   assert.equal((await rows(`select id from public.messages where id = $1`, [reported.id])).length, 0);
+  assert.equal((await rows(`select id from public.messages where id = $1`, [restarted.id])).length, 0);
   const countersAfter = await one(
     `select user_a_unread_count, user_b_unread_count from public.matches where id = $1`,
     [expMatchId]
@@ -3021,10 +3107,8 @@ test('75 · expiry: cleanup deletes expired messages and zeroes counters (OPEN r
   assert.equal(countersAfter.user_b_unread_count, 0);
 });
 
-test('76 · expiry: cleanup honors the >24h grace (fresh conversations untouched)', async () => {
+test('76 · expiry: cleanup leaves younger chats alone, then deletes them at 24h', async () => {
   await actAsService();
-  // A conversation whose last message is 30h old (expired for reads, but not
-  // yet past the 48h cleanup window) keeps its rows.
   const [smaller, larger] = [expProfileB.id, expProfileC.id].sort();
   const match = await one(
     `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
@@ -3032,16 +3116,26 @@ test('76 · expiry: cleanup honors the >24h grace (fresh conversations untouched
   );
   const keep = await one(
     `insert into public.messages (match_id, sender_profile_id, body)
-     values ($1, $2, 'not yet cleaned') returning id`,
+     values ($1, $2, 'not yet expired') returning id`,
     [match.id, expProfileB.id]
   );
-  await one(`update public.matches set last_message_at = now() - interval '30 hours' where id = $1 returning 1`, [match.id]);
+  await one(`update public.matches set last_message_at = now() - interval '23 hours' where id = $1 returning 1`, [match.id]);
 
+  // 23h is still inside the single 24h window: cleanup must not touch it.
   await one(`select public.expire_stale_conversations()`);
   assert.equal((await rows(`select id from public.messages where id = $1`, [keep.id])).length, 1);
 
-  // The send RPC works on the expired-but-uncleaned conversation and resets it.
-  await one(`select public.send_conversation_message($1, $2, 'revived')`, [match.id, expProfileB.id]);
+  // One hour later the same cleanup physically deletes it.
+  await one(`update public.matches set last_message_at = now() - interval '25 hours' where id = $1 returning 1`, [match.id]);
+  await one(`select public.expire_stale_conversations()`);
+  assert.equal((await rows(`select id from public.messages where id = $1`, [keep.id])).length, 0);
+
+  // The match survives and either side can start a fresh, empty-history chat.
+  const restarted = await one(
+    `select * from public.send_conversation_message($1, $2, 'revived')`,
+    [match.id, expProfileB.id]
+  );
+  assert.ok(restarted.id);
   const sides = await one(`select user_a_id, user_b_id from public.matches where id = $1`, [match.id]);
   const userOfB = sides.user_a_id === expProfileB.id ? expUserB : expUserC;
   await actAs(userOfB.id);
@@ -3092,6 +3186,198 @@ test('77 · expiry: block and unmatch still take precedence and behave unchanged
   assert.equal((await rows(`select id from public.messages where match_id = $1`, [match.id])).length, 0);
   await actAsService();
   await one(`delete from public.blocks where blocker_profile_id = $1 returning 1`, [profileOfA.id]);
+});
+
+test('87 · scheduling: the 24h migration installs the recurring cleanup job', async () => {
+  await actAsService();
+  const job = await one(
+    `select jobname, schedule, command, active
+     from cron.job
+     where jobname = 'unimatch-expire-stale-conversations'`
+  );
+  assert.equal(job.schedule, '*/5 * * * *');
+  assert.equal(job.command, 'select public.expire_stale_conversations();');
+  assert.equal(job.active, true);
+});
+
+test('88 · expiry: backfill hides legacy report-pinned survivors after a restart', async () => {
+  await actAsService();
+  const { user: bfUserA, profile: bfProfileA } = await insertVerifiedUserFixture('backfill-a', 'BF1');
+  const { user: bfUserB, profile: bfProfileB } = await insertVerifiedUserFixture('backfill-b', 'BF2');
+  const [smaller, larger] = [bfProfileA.id, bfProfileB.id].sort();
+  const match = await one(
+    `insert into public.matches (user_a_id, user_b_id) values ($1, $2) returning id`,
+    [smaller, larger]
+  );
+
+  // Old-policy survivor: a report-pinned row from a round that expired before
+  // a later restart. It has no expired_at marker (the column did not exist).
+  const oldPinned = await one(
+    `insert into public.messages (match_id, sender_profile_id, body, created_at)
+     values ($1, $2, 'old pinned evidence', now() - interval '72 hours') returning id`,
+    [match.id, bfProfileA.id]
+  );
+  await one(
+    `insert into public.reports
+       (reporter_profile_id, reported_profile_id, reason, content_type, content_id)
+     values ($1, $2, 'harassment', 'message', $3) returning id`,
+    [bfProfileA.id, bfProfileB.id, oldPinned.id]
+  );
+
+  // The current, continuously active round (every gap < 24h). One of its
+  // messages is also report-pinned and must NOT be marked expired by backfill.
+  const currentPinned = await one(
+    `insert into public.messages (match_id, sender_profile_id, body, created_at)
+     values ($1, $2, 'current pinned', now() - interval '30 hours') returning id`,
+    [match.id, bfProfileB.id]
+  );
+  await one(
+    `insert into public.reports
+       (reporter_profile_id, reported_profile_id, reason, content_type, content_id)
+     values ($1, $2, 'spam', 'message', $3) returning id`,
+    [bfProfileA.id, bfProfileB.id, currentPinned.id]
+  );
+  await rows(
+    `insert into public.messages (match_id, sender_profile_id, body, created_at)
+     values
+       ($1, $2, 'current -40h', now() - interval '40 hours'),
+       ($1, $2, 'current -20h', now() - interval '20 hours'),
+       ($1, $2, 'current -10h', now() - interval '10 hours')`,
+    [match.id, bfProfileA.id]
+  );
+  const latest = await one(
+    `insert into public.messages (match_id, sender_profile_id, body)
+     values ($1, $2, 'current latest') returning created_at`,
+    [match.id, bfProfileA.id]
+  );
+  await one(
+    `update public.matches set last_message_at = $2 where id = $1 returning 1`,
+    [match.id, latest.created_at]
+  );
+
+  // Precondition: the legacy survivor is visible because the restarted round
+  // reset the 24h window. This is the bug the backfill must close.
+  await actAs(bfUserA.id);
+  const before = await rows(
+    `select body from public.messages where match_id = $1`,
+    [match.id]
+  );
+  assert.ok(
+    before.some((r) => r.body === 'old pinned evidence'),
+    'precondition: a legacy pinned row is visible before the backfill'
+  );
+
+  // Re-running the new migration applies the same idempotent backfill a real
+  // deployment would run once.
+  await actAsService();
+  await exec(expiry24hSql);
+
+  const markedOld = await one(
+    `select expired_at from public.messages where id = $1`,
+    [oldPinned.id]
+  );
+  assert.notEqual(markedOld.expired_at, null, 'legacy survivor must be marked expired');
+  const markedCurrent = await one(
+    `select expired_at from public.messages where id = $1`,
+    [currentPinned.id]
+  );
+  assert.equal(markedCurrent.expired_at, null, 'current-round messages stay visible');
+
+  // Participants see only the current round; the evidence row is retained for
+  // staff and remains reachable through the service role.
+  await actAs(bfUserA.id);
+  const after = await rows(
+    `select body from public.messages where match_id = $1 order by created_at`,
+    [match.id]
+  );
+  assert.ok(!after.some((r) => r.body === 'old pinned evidence'));
+  assert.equal(after.length, 5);
+
+  await actAsService();
+  assert.equal(
+    (await rows(`select 1 from public.messages where id = $1`, [oldPinned.id])).length,
+    1,
+    'moderation evidence must not be deleted'
+  );
+
+  // Idempotent: a second run preserves the original expiration marker.
+  const firstMarker = markedOld.expired_at.getTime();
+  await exec(expiry24hSql);
+  const markedAgain = await one(
+    `select expired_at from public.messages where id = $1`,
+    [oldPinned.id]
+  );
+  assert.equal(markedAgain.expired_at.getTime(), firstMarker);
+});
+
+test('89 · scheduling: migration aborts and rolls back when pg_cron cannot be installed', async () => {
+  const failDb = new PGlite();
+  try {
+    await failDb.exec(bootstrapSql);
+    await applyMigrationsBeforeExpiry(failDb);
+
+    await failDb.exec('begin');
+    try {
+      await assert.rejects(
+        () => failDb.exec(expiry24hSql),
+        /could not be scheduled|pg_cron is unavailable/
+      );
+    } finally {
+      await failDb.exec('rollback');
+    }
+
+    const cols = await failDb.query(
+      `select 1 from information_schema.columns
+       where table_schema = 'public' and table_name = 'messages'
+         and column_name = 'expired_at'`
+    );
+    assert.equal(cols.rows.length, 0, 'failed migration must not leave partial changes');
+  } finally {
+    await failDb.close();
+  }
+});
+
+test('90 · scheduling: migration aborts and rolls back when the cleanup job cannot be scheduled', async () => {
+  const failDb = new PGlite();
+  try {
+    await failDb.exec(bootstrapSql);
+    await failDb.exec(fakeCronSql);
+    await failDb.exec(`
+      create or replace function cron.schedule(
+        job_name text,
+        schedule text,
+        command text
+      ) returns bigint
+      language plpgsql
+      as $fn$
+      begin
+        raise exception 'simulated pg_cron schedule failure';
+      end;
+      $fn$;
+    `);
+    await applyMigrationsBeforeExpiry(failDb);
+
+    await failDb.exec('begin');
+    try {
+      await assert.rejects(
+        () => failDb.exec(expiry24hSql),
+        /could not be scheduled/
+      );
+    } finally {
+      await failDb.exec('rollback');
+    }
+
+    const cols = await failDb.query(
+      `select 1 from information_schema.columns
+       where table_schema = 'public' and table_name = 'messages'
+         and column_name = 'expired_at'`
+    );
+    assert.equal(cols.rows.length, 0, 'failed migration must not leave partial changes');
+    const jobs = await failDb.query(`select 1 from cron.job`);
+    assert.equal(jobs.rows.length, 0, 'no partial schedule may survive the failure');
+  } finally {
+    await failDb.close();
+  }
 });
 
 // ============================================================================

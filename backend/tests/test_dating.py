@@ -654,7 +654,7 @@ def test_reciprocal_like_returns_matched_with_safe_payload(client, fake):
     body = resp.json()
     assert body["outcome"] == "matched"
     match = body["match"]
-    assert set(match.keys()) == {"id", "created_at", "profile"}
+    assert set(match.keys()) == {"id", "created_at", "chat_expired", "profile"}
     profile = match["profile"]
     assert profile["id"] == str(VIEWER_PROFILE_ID)
     assert profile["first_name"] == "Jamie"
@@ -723,7 +723,7 @@ def test_only_participants_see_the_match(client, fake):
         body = resp.json()
         assert len(body["matches"]) == 1
         entry = body["matches"][0]
-        assert set(entry.keys()) == {"id", "created_at", "profile"}
+        assert set(entry.keys()) == {"id", "created_at", "chat_expired", "profile"}
 
     # A third verified user sees nothing.
     resp = client.get(MATCHES_API, headers=THIRD_HEADERS)

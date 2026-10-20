@@ -87,6 +87,11 @@ export function isSuspended(error: unknown): boolean {
   return error instanceof ApiError && error.code === "suspended";
 }
 
+/** True when the conversation (or other resource) is gone for this caller. */
+export function isNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.code === "not_found";
+}
+
 /**
  * Fetch JSON from the backend with the Supabase bearer token attached.
  *

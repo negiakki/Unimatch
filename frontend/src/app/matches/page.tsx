@@ -229,7 +229,7 @@ function MatchCard({
           </p>
         )}
         <ButtonLink href={`/messages/${match.id}`} className="w-full">
-          Message
+          {match.chat_expired ? "Start new chat" : "Message"}
         </ButtonLink>
         <Button
           variant="ghost"
