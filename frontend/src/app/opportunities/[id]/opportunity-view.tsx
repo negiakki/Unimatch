@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
+import { OpportunityHero } from "@/components/opportunity-hero";
 import { SignOutButton } from "@/components/sign-out-button";
 import {
   Button,
@@ -25,10 +26,13 @@ import {
 import {
   categoryKey,
   cx,
-  formatClock,
   formatEventDate,
   partnerCta,
 } from "@/lib/format";
+import {
+  opportunityThemeStyle,
+  resolveOpportunityTheme,
+} from "@/lib/opportunity-theme";
 
 /**
  * The opportunity as an event page: cover, title, when/where, the story, and
@@ -115,11 +119,15 @@ export function OpportunityView({ opportunityId }: { opportunityId: string }) {
 
   if (phase === "loading") {
     return (
-      <div aria-busy="true" aria-live="polite" className="mx-auto max-w-6xl px-5 sm:px-8">
+      <div aria-busy="true" aria-live="polite">
         <span className="sr-only">Loading opportunity</span>
-        <div className="aspect-16/10 w-full animate-pulse bg-line sm:aspect-21/9" />
-        <div className="mt-10 h-14 w-2/3 animate-pulse bg-line" />
-        <div className="mt-4 h-5 w-48 animate-pulse bg-line" />
+        <div className="h-[min(76svh,760px)] w-full animate-pulse bg-ink/10 sm:h-[min(88svh,820px)]" />
+        <div className="mx-auto mt-10 max-w-6xl px-5 sm:px-8">
+          <div className="h-12 w-2/3 animate-pulse bg-line" />
+          <div className="mt-4 h-5 w-48 animate-pulse bg-line" />
+          <div className="mt-10 h-5 w-full animate-pulse bg-line" />
+          <div className="mt-3 h-5 w-5/6 animate-pulse bg-line" />
+        </div>
       </div>
     );
   }
@@ -139,53 +147,64 @@ export function OpportunityView({ opportunityId }: { opportunityId: string }) {
     );
   }
 
-  const day = formatEventDate(opportunity.opportunity_date);
-  const start = formatClock(opportunity.start_time);
-  const end = formatClock(opportunity.end_time);
+  const theme = resolveOpportunityTheme(opportunity);
+  const heroCta = application
+    ? {
+        href: `/opportunities/${opportunity.id}/people`,
+        label: partnerCta(opportunity.activity, opportunity.title),
+      }
+    : signedIn === false
+      ? { href: "#join", label: "Sign up to join" }
+      : { href: "#join", label: "I'm going" };
 
   return (
-    <article data-category={categoryKey(opportunity.category ?? {})}>
-      {/* Full-bleed cover. */}
-      <CoverImage
-        src={opportunity.cover_image_url}
-        alt={opportunity.title ?? "Opportunity"}
-        slug={opportunity.category?.slug}
-        name={opportunity.category?.name}
-        priority
-        sizes="100vw"
-        className="animate-wipe-up h-[62svh] min-h-80 w-full"
+    <article
+      data-category={categoryKey(opportunity.category ?? {})}
+      style={opportunityThemeStyle(theme) as React.CSSProperties}
+    >
+      <OpportunityHero
+        opportunity={opportunity}
+        theme={theme}
+        ctaLabel={heroCta.label}
+        ctaHref={heroCta.href}
       />
 
-      <div className="mx-auto w-full max-w-6xl px-5 sm:px-8">
-        {/* Title block. */}
-        <header className="animate-rise -mt-10 border-t border-line bg-paper pt-8 sm:-mt-16 sm:pt-12">
-          <Label className="text-accent">
-            {[opportunity.activity?.name, opportunity.category?.name]
-              .filter(Boolean)
-              .join(" · ")}
-          </Label>
-          <h1 className="type-display mt-3 text-[clamp(2.25rem,9vw,5.5rem)]">
-            {opportunity.title}
-          </h1>
+      <div aria-hidden className="h-1.5 w-full bg-accent" />
 
-          {/* When / where, as a typographic data row rather than a chip grid. */}
-          <dl className="mt-8 grid gap-6 border-y border-line py-6 sm:grid-cols-3">
-            <Fact label="Date" value={day} />
-            <Fact
-              label="Time"
-              value={start ? (end ? `${start} – ${end}` : start) : "—"}
-            />
-            <Fact label="Where" value={opportunity.location ?? "—"} />
-            {opportunity.capacity !== null && (
-              <Fact label="Capacity" value={String(opportunity.capacity)} />
-            )}
-          </dl>
-        </header>
+      <div className="mx-auto w-full max-w-6xl px-5 sm:px-8">
+        {/* The event's atmosphere, set as an editorial pull quote. */}
+        <section
+          className="animate-rise relative overflow-hidden border-b border-line py-8 sm:py-12"
+          style={{ backgroundColor: theme.soft }}
+        >
+          <div className="flex flex-col gap-4 sm:gap-7 md:flex-row md:items-end md:justify-between">
+            <div>
+              <Label className="text-accent">The mood</Label>
+              <p className="type-display mt-3 max-w-2xl text-[clamp(1.75rem,4.5vw,3.25rem)] leading-[1.02]">
+                {theme.atmosphere}
+              </p>
+            </div>
+            <ul className="flex flex-wrap gap-2">
+              {theme.mood.map((word) => (
+                <li key={word}>
+                  <span className="inline-flex rounded-full border border-accent/25 bg-paper/80 px-3.5 py-1.5 text-[13px] font-semibold text-accent">
+                    {word}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
 
         {/* The step that matters, stated plainly. */}
-        <section className="mt-12 grid gap-10 md:grid-cols-12 md:gap-8">
+        <section className="mt-8 grid gap-7 sm:mt-12 md:grid-cols-12 md:gap-8">
           <div className="md:col-span-7">
-            <Label>The idea</Label>
+            <Label className="text-accent">The idea</Label>
+            <h2 className="type-display mt-3 text-title">
+              {opportunity.activity?.name
+                ? `About ${opportunity.activity.name}`
+                : "About this"}
+            </h2>
             {opportunity.description ? (
               <p className="mt-4 max-w-prose text-[17px] leading-relaxed">
                 {opportunity.description}
@@ -208,8 +227,12 @@ export function OpportunityView({ opportunityId }: { opportunityId: string }) {
 
           {/* Sticky on desktop so the next step is always in reach. */}
           <div className="md:col-span-5">
-            <div className="border border-line bg-surface p-6 md:sticky md:top-24">
-              <h2 className="type-display text-title">Who&apos;s looking?</h2>
+            <div
+              id="join"
+              className="scroll-mt-20 border border-line border-t-4 border-t-accent bg-surface p-5 sm:p-6 md:sticky md:top-24"
+            >
+              <Label className="text-accent">Next step</Label>
+              <h2 className="type-display mt-2 text-title">Who&apos;s looking?</h2>
               <p className="mt-3 text-[15px] leading-relaxed text-muted">
                 {application
                   ? "You're going. Now meet the other students who applied for this."
@@ -272,15 +295,6 @@ export function OpportunityView({ opportunityId }: { opportunityId: string }) {
 
 /* ------------------------------------------------------------- fragments -- */
 
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <dt className="type-meta text-muted">{label}</dt>
-      <dd className="type-display mt-1.5 text-xl">{value}</dd>
-    </div>
-  );
-}
-
 /** A quiet closer so the page doesn't dead-end. */
 function MoreLikeThis({
   excludeId,
@@ -312,40 +326,50 @@ function MoreLikeThis({
   }
 
   return (
-    <section className="mt-20 border-t border-line pt-8">
+    <section className="mt-12 border-t border-line pt-8 sm:mt-20">
       <h2 className="type-display text-title">Also happening</h2>
       <ul className="mt-8 grid gap-8 sm:grid-cols-3">
-        {related.map((opportunity) => (
-          <li key={opportunity.id}>
-            <Link
-              href={`/opportunities/${opportunity.id}`}
-              data-category={categoryKey(opportunity.category ?? {})}
-              className="group block"
-            >
-              <CoverImage
-                src={opportunity.cover_image_url}
-                alt=""
-                slug={opportunity.category?.slug}
-                name={opportunity.category?.name}
-                sizes="(max-width: 640px) 100vw, 320px"
-                className="aspect-4/3 w-full"
-              />
-              <h3
-                className={cx(
-                  "type-display mt-3 truncate text-xl",
-                  "transition-colors group-hover:text-accent",
-                )}
+        {related.map((opportunity) => {
+          const theme = resolveOpportunityTheme(opportunity);
+          return (
+            <li key={opportunity.id}>
+              <Link
+                href={`/opportunities/${opportunity.id}`}
+                data-category={categoryKey(opportunity.category ?? {})}
+                style={opportunityThemeStyle(theme) as React.CSSProperties}
+                className="group block"
               >
-                {opportunity.title}
-              </h3>
-              <p className="mt-1 truncate text-sm text-muted">
-                {[formatEventDate(opportunity.opportunity_date), opportunity.location]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </p>
-            </Link>
-          </li>
-        ))}
+                <CoverImage
+                  src={opportunity.cover_image_url}
+                  alt=""
+                  fallbackSrc={theme.photo?.src ?? null}
+                  fallbackAlt={theme.photo?.alt}
+                  objectPosition={theme.photo?.position}
+                  slug={opportunity.category?.slug}
+                  name={opportunity.category?.name}
+                  sizes="(max-width: 640px) 100vw, 320px"
+                  className="aspect-4/3 w-full"
+                />
+                <h3
+                  className={cx(
+                    "type-display mt-3 truncate text-xl",
+                    "transition-colors group-hover:text-accent",
+                  )}
+                >
+                  {opportunity.title}
+                </h3>
+                <p className="mt-1 truncate text-sm text-muted">
+                  {[
+                    formatEventDate(opportunity.opportunity_date),
+                    opportunity.location,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              </Link>
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

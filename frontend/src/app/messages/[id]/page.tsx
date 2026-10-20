@@ -10,6 +10,7 @@ import {
   type FormEvent,
 } from "react";
 
+import { AppNav } from "@/components/app-nav";
 import {
   Avatar,
   Button,
@@ -273,8 +274,10 @@ export default function ConversationPage() {
   return (
     <div
       data-category={categoryKey(conversation?.opportunity?.category ?? {})}
-      className="flex h-dvh flex-col"
+      className="flex h-dvh flex-col pb-[calc(var(--app-nav-height)+env(safe-area-inset-bottom))] md:pb-0"
     >
+      <AppNav />
+
       <header className="flex items-center gap-3 border-b border-line px-4 py-3">
         <Link
           href="/messages"
@@ -510,7 +513,7 @@ export default function ConversationPage() {
           )}
 
           <form
-            className="flex items-end gap-2 border-t border-line px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+            className="flex items-end gap-2 border-t border-line px-4 py-3"
             onSubmit={(event) => {
               event.preventDefault();
               void handleSend();

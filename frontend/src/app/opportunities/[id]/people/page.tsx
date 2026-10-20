@@ -22,7 +22,7 @@ export default async function PeoplePage({
 }) {
   const { id } = await params;
   return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-lg flex-col px-5 pb-10">
+    <main className="mx-auto flex min-h-dvh w-full max-w-lg flex-col px-5 pb-[calc(2.5rem+env(safe-area-inset-bottom))]">
       <PeopleDiscovery opportunityId={id} />
     </main>
   );

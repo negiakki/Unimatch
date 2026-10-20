@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-import { AppNav, TAB_BAR_SPACE } from "@/components/app-nav";
+import { AppNav } from "@/components/app-nav";
 
 import { ExploreClient } from "./explore-client";
 
@@ -19,7 +19,7 @@ export default function ExplorePage() {
   return (
     <>
       <AppNav />
-      <main className={`mx-auto w-full max-w-6xl px-5 sm:px-8 ${TAB_BAR_SPACE}`}>
+      <main className="mx-auto w-full max-w-6xl px-5 pb-nav sm:px-8 md:pb-16">
         <ExploreClient />
       </main>
     </>

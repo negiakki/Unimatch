@@ -149,7 +149,10 @@ export function AppNav() {
         )}
       </header>
 
-      {/* Mobile: minimal wordmark up top, tabs pinned to the bottom edge. */}
+      {/* Mobile: minimal wordmark up top, tabs pinned to the bottom edge.
+          Page mains use the `pb-nav` utility directly (never a constant
+          imported from this client module) so content can always scroll clear
+          of this bar plus the safe-area inset. */}
       <header className="sticky top-0 z-40 flex items-center justify-between border-b border-line bg-paper/90 px-5 py-3 backdrop-blur md:hidden">
         <Link href="/explore" className="type-display text-lg tracking-tight">
           UniMatch
@@ -198,6 +201,3 @@ export function AppNav() {
     </>
   );
 }
-
-/** Bottom-nav safe padding for the last element of a signed-in page. */
-export const TAB_BAR_SPACE = "pb-24 md:pb-16";

@@ -1,6 +1,8 @@
+"use client";
+
 import Image from "next/image";
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { categoryKey, cx } from "@/lib/format";
 
@@ -23,7 +25,7 @@ const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
 
 /** 48px min height — a comfortable thumb target, per mobile-first rules. */
 const BUTTON_BASE =
-  "inline-flex items-center justify-center gap-2 rounded-full px-6 py-3 text-sm font-semibold tracking-tight transition-[transform,filter,background-color,border-color] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40";
+  "inline-flex min-h-12 items-center justify-center gap-2 rounded-full px-6 py-3 text-sm font-semibold tracking-tight transition-[transform,filter,background-color,border-color] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40";
 
 export function Button({
   variant = "solid",
@@ -159,12 +161,22 @@ export function Avatar({
   );
 }
 
-/** Full-bleed opportunity imagery with a coherent category-tinted fallback. */
+/**
+ * Opportunity imagery with a coherent category-tinted fallback.
+ *
+ * Remote cover URLs render unoptimized on purpose: they are admin-entered on
+ * arbitrary hosts, and Next's optimizer rejects hosts that aren't configured.
+ * Local theme assets are optimized normally. If every URL is broken, the tile
+ * keeps its category atmosphere instead of showing a broken-image icon.
+ */
 export function CoverImage({
   src,
   alt,
   slug,
   name,
+  fallbackSrc,
+  fallbackAlt,
+  objectPosition,
   className,
   sizes = "100vw",
   priority,
@@ -173,31 +185,58 @@ export function CoverImage({
   alt: string;
   slug?: string | null;
   name?: string | null;
+  fallbackSrc?: string | null;
+  fallbackAlt?: string | null;
+  objectPosition?: string;
   className?: string;
   sizes?: string;
   priority?: boolean;
 }) {
+  const [failed, setFailed] = useState<string[]>([]);
+  const image = [
+    src ? { src, alt } : null,
+    fallbackSrc ? { src: fallbackSrc, alt: fallbackAlt || alt } : null,
+  ]
+    .filter((entry): entry is { src: string; alt: string } => Boolean(entry))
+    .find((entry) => !failed.includes(entry.src));
+
+  function handleImageError(url: string) {
+    setFailed((current) =>
+      current.includes(url) ? current : [...current, url],
+    );
+  }
+
   return (
     <div
       data-category={categoryKey({ slug, name })}
       className={cx("relative overflow-hidden bg-ink", className)}
     >
-      {src ? (
+      {image ? (
         <Image
-          src={src}
-          alt={alt}
+          key={image.src}
+          src={image.src}
+          alt={image.alt}
           fill
-          unoptimized={!src.startsWith("http")}
+          unoptimized={!image.src.startsWith("/")}
           priority={priority}
           sizes={sizes}
+          style={{
+            objectPosition:
+              image.src === fallbackSrc ? objectPosition : undefined,
+          }}
+          onError={() => handleImageError(image.src)}
           className="object-cover"
         />
       ) : (
         <div
-          aria-hidden
+          role={alt ? "img" : undefined}
+          aria-label={alt || undefined}
           className="grid size-full place-items-center bg-accent"
         >
-          <span className="type-display px-4 text-center text-[clamp(2rem,8vw,4rem)] text-accent-ink/90">
+          <span
+            aria-hidden
+            className="type-display px-4 text-center text-[clamp(2rem,8vw,4rem)] text-accent-ink/90"
+          >
             {alt}
           </span>
         </div>

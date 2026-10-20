@@ -32,6 +32,13 @@
   --dur-fast: 140ms;
   --dur-base: 260ms;
   --dur-slow: 520ms;
+
+  /* Mobile tab bar. One source of truth: the bar's height, the safe-area
+     inset it absorbs, and the breathing room page content leaves beneath it. */
+  --app-nav-height: 3.75rem; /* 60px tab row incl. hairline border */
+  --app-nav-space: calc(
+    var(--app-nav-height) + env(safe-area-inset-bottom) + 2.5rem
+  );
 }
 
 /* Category atmospheres — same brand, different mood. Keyed by category slug. */
@@ -83,6 +90,11 @@
   --text-display: clamp(2.5rem, 8vw, 5.5rem);
   --text-title: clamp(1.75rem, 4.5vw, 3rem);
   --text-meta: 0.6875rem;
+}
+
+html {
+  /* Keep anchor jumps and focused controls clear of the mobile tab bar. */
+  scroll-padding-bottom: var(--app-nav-space);
 }
 
 body {
@@ -233,6 +245,15 @@ body {
 
 @utility hairline {
   border-color: var(--line);
+}
+
+/*
+ * Bottom-of-page clearance for signed-in screens, so their last control can
+ * always scroll clear of the fixed mobile tab bar. Includes the safe-area
+ * inset the bar itself pads with.
+ */
+@utility pb-nav {
+  padding-bottom: var(--app-nav-space);
 }
 
 /* ------------------------------------------------------------ utilities -- */

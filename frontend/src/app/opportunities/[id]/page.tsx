@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-import { AppNav, TAB_BAR_SPACE } from "@/components/app-nav";
+import { AppNav } from "@/components/app-nav";
 
 import { OpportunityView } from "./opportunity-view";
 
@@ -34,7 +34,7 @@ export default async function OpportunityPage({
   return (
     <>
       <AppNav />
-      <main className={`flex-1 ${TAB_BAR_SPACE}`}>
+      <main className="flex-1 pb-nav md:pb-16">
         <OpportunityView opportunityId={id} />
       </main>
     </>

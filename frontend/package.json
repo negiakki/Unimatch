@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "check:theme": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-opportunity-theme.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",

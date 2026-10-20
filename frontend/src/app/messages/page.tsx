@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
-import { AppNav, TAB_BAR_SPACE } from "@/components/app-nav";
+import { AppNav } from "@/components/app-nav";
 import { SignOutButton } from "@/components/sign-out-button";
 import {
   Avatar,
@@ -88,7 +88,7 @@ export default function MessagesPage() {
   return (
     <>
       <AppNav />
-      <main className={`mx-auto w-full max-w-6xl px-5 sm:px-8 ${TAB_BAR_SPACE}`}>
+      <main className="mx-auto w-full max-w-6xl px-5 pb-nav sm:px-8 md:pb-16">
         <section
           data-category="social"
           className="animate-rise -mx-5 px-5 pt-10 pb-8 sm:-mx-8 sm:px-8"

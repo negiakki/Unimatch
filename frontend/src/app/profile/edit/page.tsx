@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-import { AppNav, TAB_BAR_SPACE } from "@/components/app-nav";
+import { AppNav } from "@/components/app-nav";
 
 import { ProfileEditForm } from "./profile-edit-form";
 
@@ -15,7 +15,7 @@ export default function ProfileEditPage() {
     <>
       <AppNav />
       <main
-        className={`mx-auto w-full max-w-2xl px-5 sm:px-8 ${TAB_BAR_SPACE}`}
+        className="mx-auto w-full max-w-2xl px-5 pb-nav sm:px-8 md:pb-16"
       >
         <ProfileEditForm />
       </main>

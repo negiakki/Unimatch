@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
-import { AppNav, TAB_BAR_SPACE } from "@/components/app-nav";
+import { AppNav } from "@/components/app-nav";
 import { SignOutButton } from "@/components/sign-out-button";
 import {
   Button,
@@ -17,7 +17,6 @@ import {
 } from "@/components/ui";
 import { isApiError, isSuspended, isUnauthorized } from "@/lib/api/http";
 import { fetchMyApplications, isJoined } from "@/lib/api/opportunities";
-import { cx } from "@/lib/format";
 import { fetchPhotos, MAX_PHOTOS, type ProfilePhoto } from "@/lib/api/photos";
 import {
   MOTIVATION_OPTIONS,
@@ -124,10 +123,12 @@ export default function ProfilePage() {
     return (
       <>
         <AppNav />
-        <SuspendedState
-          message="Your account has been suspended from participating in UniMatch."
-          action={<SignOutButton />}
-        />
+        <main className="pb-nav md:pb-16">
+          <SuspendedState
+            message="Your account has been suspended from participating in UniMatch."
+            action={<SignOutButton />}
+          />
+        </main>
       </>
     );
   }
@@ -140,7 +141,7 @@ export default function ProfilePage() {
   return (
     <>
       <AppNav />
-      <main className={`mx-auto w-full max-w-6xl px-5 sm:px-8 ${TAB_BAR_SPACE}`}>
+      <main className="mx-auto w-full max-w-6xl px-5 pb-nav sm:px-8 md:pb-16">
         {phase === "loading" && <LoadingBlock label="Loading your profile" rows={4} />}
 
         {phase === "error" && (
@@ -333,7 +334,7 @@ export default function ProfilePage() {
               </div>
             </section>
 
-            <p className={cx("mt-10 text-sm text-muted", TAB_BAR_SPACE)}>
+            <p className="mt-10 text-sm text-muted">
               <Link href="/explore" className="underline underline-offset-4 hover:text-ink">
                 Back to what&apos;s happening
               </Link>

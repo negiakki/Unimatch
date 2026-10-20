@@ -27,6 +27,10 @@ import {
   type Opportunity,
 } from "@/lib/api/opportunities";
 import { categoryKey, cx, formatWhen, partnerCta } from "@/lib/format";
+import {
+  opportunityThemeStyle,
+  resolveOpportunityTheme,
+} from "@/lib/opportunity-theme";
 
 /**
  * The discovery hub: categories, what's happening, and your own activity.
@@ -359,33 +363,57 @@ function OpportunityTile({
   lead: boolean;
 }) {
   const when = formatWhen(opportunity.opportunity_date, opportunity.start_time);
+  const theme = resolveOpportunityTheme(opportunity);
+  const taxonomy = [opportunity.activity?.name, opportunity.category?.name]
+    .filter(Boolean)
+    .join(" · ");
+  const cta = partnerCta(opportunity.activity, opportunity.title);
+  const photo = {
+    src: opportunity.cover_image_url,
+    fallbackSrc: theme.photo?.src ?? null,
+    fallbackAlt: theme.photo?.alt,
+    objectPosition: theme.photo?.position,
+  };
 
   if (lead) {
     return (
       <Link
         href={`/opportunities/${opportunity.id}`}
         data-category={categoryKey(opportunity.category ?? {})}
-        className="group block"
+        style={opportunityThemeStyle(theme) as React.CSSProperties}
+        className="group grid overflow-hidden border border-line bg-surface transition-colors hover:border-line-strong md:grid-cols-2"
       >
         <CoverImage
-          src={opportunity.cover_image_url}
-          alt={opportunity.title ?? "Opportunity"}
+          src={photo.src}
+          alt=""
+          fallbackSrc={photo.fallbackSrc}
+          fallbackAlt={photo.fallbackAlt}
+          objectPosition={photo.objectPosition}
           slug={opportunity.category?.slug}
           name={opportunity.category?.name}
           priority
-          sizes="(max-width: 1024px) 100vw, 1024px"
-          className="animate-wipe-up aspect-4/3 sm:aspect-16/9"
+          sizes="(max-width: 768px) 100vw, (max-width: 1152px) 50vw, 576px"
+          className="aspect-4/3 w-full md:aspect-auto md:h-full md:min-h-[340px]"
         />
-        <div className="mt-5">
-          <Label className="text-accent">
-            {[opportunity.activity?.name, opportunity.category?.name]
-              .filter(Boolean)
-              .join(" · ")}
-          </Label>
-          <h3 className="type-display mt-2 text-title">{opportunity.title}</h3>
-          <p className="mt-2 text-sm text-muted">
-            {[when, opportunity.location].filter(Boolean).join(" · ")}
-          </p>
+        <div className="flex flex-col justify-between gap-8 p-5 sm:p-8">
+          <div>
+            {taxonomy && <Label className="text-accent">{taxonomy}</Label>}
+            <h3 className="type-display mt-2 text-title">
+              {opportunity.title}
+            </h3>
+            <p className="mt-2 text-sm text-muted">
+              {[when, opportunity.location].filter(Boolean).join(" · ")}
+            </p>
+          </div>
+          <span className="inline-flex items-center gap-2 text-sm font-semibold text-ink">
+            {cta}
+            <span
+              aria-hidden
+              className="text-accent transition-transform duration-300 group-hover:translate-x-1"
+            >
+              →
+            </span>
+          </span>
         </div>
       </Link>
     );
@@ -395,22 +423,22 @@ function OpportunityTile({
     <Link
       href={`/opportunities/${opportunity.id}`}
       data-category={categoryKey(opportunity.category ?? {})}
+      style={opportunityThemeStyle(theme) as React.CSSProperties}
       className="group flex gap-4 border-b border-line pb-6 sm:gap-6"
     >
       <CoverImage
-        src={opportunity.cover_image_url}
+        src={photo.src}
         alt=""
+        fallbackSrc={photo.fallbackSrc}
+        fallbackAlt={photo.fallbackAlt}
+        objectPosition={photo.objectPosition}
         slug={opportunity.category?.slug}
         name={opportunity.category?.name}
-        sizes="160px"
-        className="aspect-4/3 w-28 shrink-0 sm:w-44"
+        sizes="(max-width: 640px) 112px, 176px"
+        className="aspect-4/3 w-28 shrink-0 self-start sm:w-44"
       />
       <div className="min-w-0 flex-1">
-        <Label className="text-accent">
-          {[opportunity.activity?.name, opportunity.category?.name]
-            .filter(Boolean)
-            .join(" · ")}
-        </Label>
+        {taxonomy && <Label className="text-accent">{taxonomy}</Label>}
         <h3 className="type-display mt-1 truncate text-xl sm:text-2xl">
           {opportunity.title}
         </h3>
@@ -418,7 +446,7 @@ function OpportunityTile({
           {[when, opportunity.location].filter(Boolean).join(" · ")}
         </p>
         <p className="mt-3 text-sm font-semibold text-ink">
-          {partnerCta(opportunity.activity, opportunity.title)}
+          {cta}
           <span
             aria-hidden
             className="ml-2 inline-block text-accent transition-transform duration-300 group-hover:translate-x-1"
